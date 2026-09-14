@@ -1,0 +1,73 @@
+/*
+ * LOCAL: USART0 I2S + CLKOUT2 MCLK on DK2602A.
+ * TX PC0/EXP4, BCLK PC2/EXP8, WS PB2/EXP10, MCLK PB0/EXP7 (~2.4 MHz).
+ */
+
+#include <zephyr/dt-bindings/pinctrl/silabs/xg27-pinctrl.h>
+#include <zephyr/dt-bindings/dma/silabs/xg27-dma.h>
+
+&dma0 {
+	status = "okay";
+};
+
+/ {
+	aliases {
+		i2s-tx = &usart0;
+	};
+};
+
+&pinctrl {
+	usart0_i2s_default: usart0_i2s_default {
+		group0 {
+			pins = <USART0_TX_PC0>, <USART0_CLK_PC2>, <USART0_CS_PB2>;
+			drive-push-pull;
+			output-high;
+		};
+
+		group1 {
+			pins = <USART0_RX_PC1>;
+			input-enable;
+		};
+	};
+
+	clkout_default: clkout_default {
+		group0 {
+			pins = <CMU_CLKOUT2_PB0>;
+			drive-push-pull;
+		};
+	};
+};
+
+/delete-node/ &mx25r80;
+
+&usart0 {
+	compatible = "silabs,usart-i2s";
+	/delete-property/ cs-gpios;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	pinctrl-0 = <&usart0_i2s_default>;
+	pinctrl-names = "default";
+	silabs,mclk-out = <&clkout2>;
+	silabs,mono-tx-slot = "left";
+	dmas = <&dma0 DMA_REQSEL_USART0TXBL>,
+	       <&dma0 DMA_REQSEL_USART0TXBLRIGHT>,
+	       <&dma0 DMA_REQSEL_USART0RXDATAV>;
+	dma-names = "txbl", "txblright", "rx";
+};
+
+&exportclk {
+	clock-div = <32>;
+};
+
+&clkout {
+	pinctrl-0 = <&clkout_default>;
+	pinctrl-names = "default";
+	clock-div = <1>;
+	status = "okay";
+};
+
+&clkout2 {
+	clocks = <&exportclk>;
+	status = "okay";
+};
