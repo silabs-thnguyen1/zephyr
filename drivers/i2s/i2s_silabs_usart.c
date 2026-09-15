@@ -179,6 +179,42 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev);
 static void i2s_silabs_usart_rx_try_start(const struct device *dev);
 static inline bool tx_path_is_mono(const struct i2s_silabs_usart_data *data);
 
+/*
+ * TX buffers normally come from cfg.mem_slab (Zephyr i2s_write contract). Some
+ * applications also pass flash / static pointers for zero-copy playback.
+ * k_mem_slab_free() writes a free-list link into the block, so only free when
+ * the pointer is actually inside the slab.
+ */
+static bool tx_blk_in_slab(struct k_mem_slab *slab, const void *blk)
+{
+  const char *p;
+  ptrdiff_t offset;
+
+  if ((slab == NULL) || (blk == NULL) || (slab->buffer == NULL)
+      || (slab->info.block_size == 0U)) {
+    return false;
+  }
+
+  p = blk;
+  offset = p - (const char *)slab->buffer;
+
+  return (offset >= 0)
+         && (offset < (ptrdiff_t)(slab->info.block_size * slab->info.num_blocks))
+         && ((offset % (ptrdiff_t)slab->info.block_size) == 0);
+}
+
+static void tx_release_block(struct i2s_silabs_usart_stream *tx, void *blk)
+{
+  if (blk == NULL) {
+    return;
+  }
+
+  if (tx_blk_in_slab(tx->cfg.mem_slab, blk)) {
+    k_mem_slab_free(tx->cfg.mem_slab, blk);
+  }
+  k_sem_give(&tx->sem);
+}
+
 static void tx_finish_stopping_if_quiescent(const struct device *dev)
 {
   const struct i2s_silabs_usart_cfg *cfg = dev->config;
@@ -728,8 +764,7 @@ static void i2s_silabs_usart_dma_tx_cb(const struct device *dma_dev, void *user_
   irq_unlock(key);
 
   if (done != NULL) {
-    k_mem_slab_free(tx->cfg.mem_slab, done);
-    k_sem_give(&tx->sem);
+    tx_release_block(tx, done);
   }
 
   i2s_silabs_usart_tx_try_start(dev);
@@ -818,8 +853,7 @@ static int dma_config_start(const struct i2s_silabs_usart_cfg *cfg,
     }
     tx->dma.busy = false;
     tx->active = NULL;
-    k_mem_slab_free(tx->cfg.mem_slab, blk);
-    k_sem_give(&tx->sem);
+    tx_release_block(tx, blk);
     tx->state = I2S_STATE_ERROR;
     return -1;
   }
@@ -833,8 +867,7 @@ static int dma_config_start(const struct i2s_silabs_usart_cfg *cfg,
     }
     tx->dma.busy = false;
     tx->active = NULL;
-    k_mem_slab_free(tx->cfg.mem_slab, blk);
-    k_sem_give(&tx->sem);
+    tx_release_block(tx, blk);
     tx->state = I2S_STATE_ERROR;
     return -1;
   }
@@ -883,8 +916,7 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
       if (ret < 0) {
         tx->dma.busy = false;
         tx->active = NULL;
-        k_mem_slab_free(tx->cfg.mem_slab, blk);
-        k_sem_give(&tx->sem);
+        tx_release_block(tx, blk);
         tx->state = I2S_STATE_ERROR;
         return;
       }
@@ -924,8 +956,7 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
     ret = mono_tx_silence_run(dev, len, true);
     if (ret < 0) {
       irq_unlock(key);
-      k_mem_slab_free(tx->cfg.mem_slab, blk);
-      k_sem_give(&tx->sem);
+      tx_release_block(tx, blk);
       return;
     }
   }
@@ -938,8 +969,7 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
   irq_unlock(key);
 
   if (ret < 0) {
-    k_mem_slab_free(tx->cfg.mem_slab, blk);
-    k_sem_give(&tx->sem);
+    tx_release_block(tx, blk);
   }
 }
 
@@ -1082,19 +1112,16 @@ static void tx_drop(const struct device *dev, struct i2s_silabs_usart_data *data
     data->tx_silence.busy = false;
   }
   if (data->tx.pending != NULL) {
-    k_mem_slab_free(data->tx.cfg.mem_slab, data->tx.pending);
-    k_sem_give(&data->tx.sem);
+    tx_release_block(&data->tx, data->tx.pending);
     data->tx.pending = NULL;
   }
   if (data->tx.active != NULL) {
-    k_mem_slab_free(data->tx.cfg.mem_slab, data->tx.active);
-    k_sem_give(&data->tx.sem);
+    tx_release_block(&data->tx, data->tx.active);
     data->tx.active = NULL;
   }
 
   while (block_q_get(&data->tx.q, &blk, &len) == 0) {
-    k_mem_slab_free(data->tx.cfg.mem_slab, blk);
-    k_sem_give(&data->tx.sem);
+    tx_release_block(&data->tx, blk);
   }
 }
 
