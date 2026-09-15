@@ -21,6 +21,8 @@ The I2S device to be used by the sample is specified by defining
 a devicetree alias named ``i2s_tx``
 
 This sample has been tested on :zephyr:board:`mimxrt1060_evk` (mimxrt1060_evkb)
+and on Silicon Labs xG27 boards :zephyr:board:`xg27_dk2602a` /
+:zephyr:board:`xg27_rb4194a` (USART0 I2S, no codec / MCLK).
 
 Building and Running
 ********************
@@ -34,3 +36,10 @@ To build and flash the application:
    :board: mimxrt1060_evk@B
    :goals: build flash
    :compact:
+
+xG27 radio board example:
+
+.. code-block:: console
+
+   west build -p always -b xg27_rb4194a samples/drivers/i2s/output
+   west flash
