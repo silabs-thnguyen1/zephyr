@@ -10,7 +10,6 @@ menuconfig I2S_SILABS_USART
 	select DMA
 	select PINCTRL
 	select SILABS_SISDK_USART
-	select SILABS_SISDK_PRS
 	help
 	  I2S over USART synchronous mode with I2SCTRL enabled (Series 2+ and
 	  similar). Audio data is transferred using the SoC LDMA controller
