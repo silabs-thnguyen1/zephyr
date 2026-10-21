@@ -461,7 +461,6 @@ endif()
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_MSC       ${emlib_dir}/src/em_msc.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_RMU       ${emlib_dir}/src/em_rmu.c)
 zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_RTCC      ${emlib_dir}/src/em_rtcc.c)
-zephyr_library_sources_ifdef(CONFIG_SILABS_SISDK_WDOG      ${emlib_dir}/src/em_wdog.c)
 
 if(CONFIG_SILABS_SISDK_USART)
   zephyr_library_sources_ifdef(CONFIG_SOC_FAMILY_SILABS_S2  ${emlib_dir}/src/em_usart.c)

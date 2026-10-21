@@ -54,14 +54,12 @@
 
 #define DT_DRV_COMPAT silabs_usart_i2s
 
-#define I2S_SILABS_SUPPORTED_OPTIONS                                                     \
-	(I2S_OPT_BIT_CLK_CONTROLLER | I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONT \
-	 | I2S_OPT_BIT_CLK_GATED)
+#define I2S_SILABS_SUPPORTED_OPTIONS                                                               \
+	(I2S_OPT_BIT_CLK_CONTROLLER | I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONT |        \
+	 I2S_OPT_BIT_CLK_GATED)
 
-#define I2S_SILABS_TX_BLOCK_Q_DEPTH CONFIG_I2S_SILABS_USART_TX_BLOCK_COUNT
-#define I2S_SILABS_RX_BLOCK_Q_DEPTH CONFIG_I2S_SILABS_USART_RX_BLOCK_COUNT
-#define I2S_SILABS_BLOCK_Q_MAX_DEPTH \
-	MAX(I2S_SILABS_TX_BLOCK_Q_DEPTH, I2S_SILABS_RX_BLOCK_Q_DEPTH)
+#define I2S_SILABS_BLOCK_Q_MAX_DEPTH                                                               \
+	MAX(CONFIG_I2S_SILABS_USART_TX_BLOCK_COUNT, CONFIG_I2S_SILABS_USART_RX_BLOCK_COUNT)
 
 /* Stereo: every LRCLK frame carries L + R = 2 channel slots. */
 #define I2S_STEREO_SLOTS_PER_FRAME 2U
@@ -69,9 +67,6 @@
 /* USART I2S data word is 16 bits (SL_HAL_USART_I2S_FORMAT_W16D16). */
 #define I2S_SILABS_WORD_SIZE_BITS  16U
 #define I2S_SILABS_WORD_SIZE_BYTES 2U
-
-/* Conversion from word_size (bits) to bytes per slot. */
-#define I2S_BITS_PER_BYTE 8U
 
 /*
  * Minimum sample rate accepted by configure().  Below 8 kHz the producer-side
@@ -94,9 +89,6 @@
  */
 #define I2S_DMA_COMPLETE_CB_ENABLED 1U
 
-/* Bytes per LDMA trigger for a 16-bit I2S data word. */
-#define I2S_DMA_DATA_SIZE I2S_SILABS_WORD_SIZE_BYTES
-
 enum i2s_silabs_usart_mono_tx_slot {
 	I2S_SILABS_USART_MONO_TX_SLOT_LEFT = 0,
 	I2S_SILABS_USART_MONO_TX_SLOT_RIGHT = 1,
@@ -111,7 +103,6 @@ struct i2s_silabs_usart_block {
 };
 
 struct i2s_silabs_usart_dma {
-	const struct device *dma_dev;
 	int channel;
 	struct dma_config dma_cfg;
 	struct dma_block_config blk_cfg;
@@ -140,7 +131,6 @@ struct i2s_silabs_usart_data {
 	struct i2s_silabs_usart_stream rx;
 	struct i2s_silabs_usart_dma tx_silence;
 	int16_t silence_16;
-	uint8_t mono_tx_slot;
 	struct k_mutex cfg_lock;
 };
 
@@ -154,7 +144,7 @@ struct i2s_silabs_usart_cfg {
 	uint32_t dma_txbl_slot;      /* LDMA slot: USARTnTXBL (buffer level, not "left") */
 	uint32_t dma_txblright_slot; /* LDMA slot: USARTnTXBLRIGHT (mono DMASPLIT only) */
 	uint32_t dma_rx_slot;
-	const struct device *mclk_dev; /* optional CMU CLKOUT providing codec MCLK */
+	const struct device *mclk_dev;      /* optional CMU CLKOUT providing codec MCLK */
 	clock_control_subsys_t mclk_subsys; /* output index for series-clock-output */
 	bool has_tx_split;
 	uint8_t mono_tx_default;
@@ -168,7 +158,7 @@ struct i2s_silabs_usart_cfg {
  * the child's reg (CLKOUT index).
  */
 static void i2s_silabs_usart_mclk_set(const struct device *mclk, clock_control_subsys_t subsys,
-	bool enable)
+				      bool enable)
 {
 	if (mclk == NULL) {
 		return;
@@ -180,48 +170,55 @@ static void i2s_silabs_usart_mclk_set(const struct device *mclk, clock_control_s
 	}
 }
 
-static void i2s_silabs_usart_isr(const void *arg);
-static void i2s_silabs_usart_tx_try_start(const struct device *dev);
-static void i2s_silabs_usart_rx_try_start(const struct device *dev);
-static inline bool tx_path_is_mono(const struct device *dev);
-
 /*
  * TX buffers normally come from cfg.mem_slab (Zephyr i2s_write contract). Some
  * applications also pass flash / static pointers for zero-copy playback.
  * k_mem_slab_free() writes a free-list link into the block, so only free when
  * the pointer is actually inside the slab.
  */
-static bool tx_blk_in_slab(struct k_mem_slab *slab, const void *blk)
+static bool i2s_silabs_usart_tx_blk_in_slab(struct k_mem_slab *slab, const void *blk)
 {
 	const char *p;
 	ptrdiff_t offset;
 
-	if ((slab == NULL) || (blk == NULL) || (slab->buffer == NULL)
-		|| (slab->info.block_size == 0U)) {
+	if ((slab == NULL) || (blk == NULL) || (slab->buffer == NULL) ||
+	    (slab->info.block_size == 0U)) {
 		return false;
 	}
 
 	p = blk;
 	offset = p - (const char *)slab->buffer;
 
-	return (offset >= 0)
-		&& (offset < (ptrdiff_t)(slab->info.block_size * slab->info.num_blocks))
-			&& ((offset % (ptrdiff_t)slab->info.block_size) == 0);
+	return (offset >= 0) &&
+	       (offset < (ptrdiff_t)(slab->info.block_size * slab->info.num_blocks)) &&
+	       ((offset % (ptrdiff_t)slab->info.block_size) == 0);
 }
 
-static void tx_release_block(struct i2s_silabs_usart_stream *tx, void *blk)
+static void i2s_silabs_usart_tx_release_block(struct i2s_silabs_usart_stream *tx, void *blk)
 {
 	if (blk == NULL) {
 		return;
 	}
 
-	if (tx_blk_in_slab(tx->cfg.mem_slab, blk)) {
+	if (i2s_silabs_usart_tx_blk_in_slab(tx->cfg.mem_slab, blk)) {
 		k_mem_slab_free(tx->cfg.mem_slab, blk);
 	}
 	k_sem_give(&tx->sem);
 }
 
-static void tx_finish_stopping_if_quiescent(const struct device *dev)
+static inline bool i2s_silabs_usart_tx_cfg_is_mono(const struct i2s_config *cfg)
+{
+	return cfg->channels == 1U;
+}
+
+static inline bool i2s_silabs_usart_tx_path_is_mono(const struct device *dev)
+{
+	const struct i2s_silabs_usart_data *data = dev->data;
+
+	return data->tx.cfg_valid && i2s_silabs_usart_tx_cfg_is_mono(&data->tx.cfg);
+}
+
+static void i2s_silabs_usart_tx_finish_stopping_if_quiescent(const struct device *dev)
 {
 	const struct i2s_silabs_usart_cfg *cfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
@@ -243,10 +240,10 @@ static void tx_finish_stopping_if_quiescent(const struct device *dev)
 	 * the channel idle so STOPPING cannot wedge.
 	 */
 	if (tx->dma.busy) {
-		dma_stop(tx->dma.dma_dev, (uint32_t)tx->dma.channel);
+		dma_stop(cfg->dma_dev, (uint32_t)tx->dma.channel);
 		tx->dma.busy = false;
 	}
-	if (tx_path_is_mono(dev) && data->tx_silence.busy) {
+	if (i2s_silabs_usart_tx_path_is_mono(dev) && data->tx_silence.busy) {
 		dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
 		data->tx_silence.busy = false;
 	}
@@ -254,16 +251,16 @@ static void tx_finish_stopping_if_quiescent(const struct device *dev)
 	tx->state = I2S_STATE_READY;
 }
 
-static inline int block_q_put(struct k_msgq *q, void *blk, size_t len)
+static inline int i2s_silabs_usart_block_q_put(struct k_msgq *q, void *blk, size_t len)
 {
-	struct i2s_silabs_usart_block item = { .blk = blk, .len = len };
+	struct i2s_silabs_usart_block item = {.blk = blk, .len = len};
 
 	return k_msgq_put(q, &item, K_NO_WAIT);
 }
 
-static inline int block_q_get(struct k_msgq *q, void **blk, size_t *len)
+static inline int i2s_silabs_usart_block_q_get(struct k_msgq *q, void **blk, size_t *len)
 {
-	struct i2s_silabs_usart_block item = { 0 };
+	struct i2s_silabs_usart_block item = {0};
 	int ret = k_msgq_get(q, &item, K_NO_WAIT);
 
 	if (ret == 0) {
@@ -273,39 +270,27 @@ static inline int block_q_get(struct k_msgq *q, void **blk, size_t *len)
 	return ret;
 }
 
-static inline void apply_dma_xfer_size(struct dma_config *dma_cfg)
+static inline void i2s_silabs_usart_apply_dma_xfer_size(struct dma_config *dma_cfg)
 {
-	dma_cfg->dest_data_size = I2S_DMA_DATA_SIZE;
-	dma_cfg->source_data_size = I2S_DMA_DATA_SIZE;
-	dma_cfg->source_burst_length = I2S_DMA_DATA_SIZE;
-	dma_cfg->dest_burst_length = I2S_DMA_DATA_SIZE;
+	dma_cfg->dest_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	dma_cfg->source_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	dma_cfg->source_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
+	dma_cfg->dest_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
 }
 
-static inline bool tx_cfg_is_mono(const struct i2s_config *cfg)
-{
-	return cfg->channels == 1U;
-}
-
-static inline bool tx_path_is_mono(const struct device *dev)
-{
-	const struct i2s_silabs_usart_data *data = dev->data;
-
-	return data->tx.cfg_valid && tx_cfg_is_mono(&data->tx.cfg);
-}
-
-static uintptr_t tx_silence_src(const struct device *dev)
+static uintptr_t i2s_silabs_usart_tx_silence_src(const struct device *dev)
 {
 	const struct i2s_silabs_usart_data *data = dev->data;
 
 	return (uintptr_t)&data->silence_16;
 }
 
-static void tx_dma_apply_stereo(const struct device *dev)
+static void i2s_silabs_usart_tx_dma_apply_stereo(const struct device *dev)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
 
-	apply_dma_xfer_size(&data->tx.dma.dma_cfg);
+	i2s_silabs_usart_apply_dma_xfer_size(&data->tx.dma.dma_cfg);
 	/*
 	 * DMASPLIT=0: USARTnTXBL (Transmit Buffer Level) triggers one LDMA move for
 	 * interleaved L+R — not the left channel alone.
@@ -316,16 +301,16 @@ static void tx_dma_apply_stereo(const struct device *dev)
 	data->tx.dma.blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 }
 
-static void tx_dma_apply_mono(const struct device *dev)
+static void i2s_silabs_usart_tx_dma_apply_mono(const struct device *dev)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
-	const bool audio_on_txbl = (data->mono_tx_slot == I2S_SILABS_USART_MONO_TX_SLOT_LEFT);
+	const bool audio_on_txbl = (pcfg->mono_tx_default == I2S_SILABS_USART_MONO_TX_SLOT_LEFT);
 	const uint32_t audio_slot = audio_on_txbl ? pcfg->dma_txbl_slot : pcfg->dma_txblright_slot;
 	const uint32_t pad_slot = audio_on_txbl ? pcfg->dma_txblright_slot : pcfg->dma_txbl_slot;
 
-	apply_dma_xfer_size(&data->tx.dma.dma_cfg);
-	apply_dma_xfer_size(&data->tx_silence.dma_cfg);
+	i2s_silabs_usart_apply_dma_xfer_size(&data->tx.dma.dma_cfg);
+	i2s_silabs_usart_apply_dma_xfer_size(&data->tx_silence.dma_cfg);
 
 	data->tx.dma.dma_cfg.dma_slot = audio_slot;
 	data->tx.dma.blk_cfg.dest_address = (uintptr_t)&pcfg->base->TXDOUBLE;
@@ -334,19 +319,19 @@ static void tx_dma_apply_mono(const struct device *dev)
 
 	data->tx_silence.dma_cfg.dma_slot = pad_slot;
 	data->tx_silence.blk_cfg.dest_address = (uintptr_t)&pcfg->base->TXDOUBLE;
-	data->tx_silence.blk_cfg.source_address = tx_silence_src(dev);
+	data->tx_silence.blk_cfg.source_address = i2s_silabs_usart_tx_silence_src(dev);
 	data->tx_silence.blk_cfg.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 	data->tx_silence.blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
-	data->tx_silence.blk_cfg.block_size = I2S_DMA_DATA_SIZE;
+	data->tx_silence.blk_cfg.block_size = I2S_SILABS_WORD_SIZE_BYTES;
 }
 
-static void hw_disable_data_irqs(USART_TypeDef *base)
+static void i2s_silabs_usart_hw_disable_data_irqs(USART_TypeDef *base)
 {
 	sl_hal_usart_disable_interrupts(base, USART_IF_TXBL | USART_IF_RXDATAV);
 	sl_hal_usart_clear_interrupts(base, USART_IF_TXBL | USART_IF_RXDATAV);
 }
 
-static void hw_disable_error_irqs(USART_TypeDef *base)
+static void i2s_silabs_usart_hw_disable_error_irqs(USART_TypeDef *base)
 {
 	sl_hal_usart_disable_interrupts(base, USART_IF_RXOF | USART_IF_TXUF);
 	sl_hal_usart_clear_interrupts(base, USART_IF_RXOF | USART_IF_TXUF);
@@ -371,8 +356,7 @@ static int i2s_silabs_usart_sync_clkdiv(uint32_t ref_hz, uint32_t baud_hz, uint3
 		return -EINVAL;
 	}
 
-	clkdiv = ((uint64_t)128U * ref_hz
-		+ (uint64_t)baud_hz / 2U) / (uint64_t)baud_hz;
+	clkdiv = ((uint64_t)128U * ref_hz + (uint64_t)baud_hz / 2U) / (uint64_t)baud_hz;
 
 	if (clkdiv < 256U) {
 		clkdiv = 256U;
@@ -380,17 +364,15 @@ static int i2s_silabs_usart_sync_clkdiv(uint32_t ref_hz, uint32_t baud_hz, uint3
 	clkdiv -= 256U;
 
 #if defined(_USART_CLKDIV_DIVEXT_MASK)
-	*clkdiv_out = (uint32_t)(clkdiv
-		& (_USART_CLKDIV_DIV_MASK | _USART_CLKDIV_DIVEXT_MASK));
+	*clkdiv_out = (uint32_t)(clkdiv & (_USART_CLKDIV_DIV_MASK | _USART_CLKDIV_DIVEXT_MASK));
 #else
 	*clkdiv_out = (uint32_t)(clkdiv & _USART_CLKDIV_DIV_MASK);
 #endif
 	return 0;
 }
 
-static int validate_i2s_config(const struct device *dev,
-	const struct i2s_config **out_ic,
-	uint32_t *ref_hz)
+static int i2s_silabs_usart_validate_config(const struct device *dev,
+					    const struct i2s_config **out_ic, uint32_t *ref_hz)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	const struct i2s_silabs_usart_data *data = dev->data;
@@ -402,7 +384,7 @@ static int validate_i2s_config(const struct device *dev,
 	}
 
 	err = clock_control_get_rate(pcfg->clock_dev,
-		(clock_control_subsys_t)(uintptr_t)&pcfg->clock_cfg, ref_hz);
+				     (clock_control_subsys_t)(uintptr_t)&pcfg->clock_cfg, ref_hz);
 	if (err < 0) {
 		return err;
 	}
@@ -449,7 +431,7 @@ static int validate_i2s_config(const struct device *dev,
 	return 0;
 }
 
-static int hw_i2s_apply(const struct device *dev)
+static int i2s_silabs_usart_hw_apply(const struct device *dev)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
@@ -461,7 +443,7 @@ static int hw_i2s_apply(const struct device *dev)
 	uint32_t interrupt_enable;
 	int err;
 
-	err = validate_i2s_config(dev, &ic, &ref_hz);
+	err = i2s_silabs_usart_validate_config(dev, &ic, &ref_hz);
 	if (err < 0) {
 		return err;
 	}
@@ -479,30 +461,29 @@ static int hw_i2s_apply(const struct device *dev)
 	 * Converted to a CLKDIV via sl_hal_usart_sync_calculate_clock_div() so the
 	 * USART produces SCLK == bit_hz on the wire.
 	 */
-	bit_hz = ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME
-		* (uint32_t)ic->word_size;
+	bit_hz = ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME * (uint32_t)ic->word_size;
 
-	apply_dma_xfer_size(&data->rx.dma.dma_cfg);
+	i2s_silabs_usart_apply_dma_xfer_size(&data->rx.dma.dma_cfg);
 
 	if (data->tx.cfg_valid) {
-		if (tx_cfg_is_mono(&data->tx.cfg)) {
-			tx_dma_apply_mono(dev);
+		if (i2s_silabs_usart_tx_cfg_is_mono(&data->tx.cfg)) {
+			i2s_silabs_usart_tx_dma_apply_mono(dev);
 		} else {
-			tx_dma_apply_stereo(dev);
+			i2s_silabs_usart_tx_dma_apply_stereo(dev);
 		}
 	}
 
-	hw_disable_data_irqs(pcfg->base);
+	i2s_silabs_usart_hw_disable_data_irqs(pcfg->base);
 
 	init.sync.clock_div = sl_hal_usart_sync_calculate_clock_div(ref_hz, bit_hz);
 	init.sync.data_bits = SL_HAL_USART_DATA_BITS_16;
 	init.sync.master = true;
 	init.sync.msb_first = true;
 	init.sync.clock_mode =
-		((ic->format & I2S_FMT_CLK_FORMAT_MASK) == I2S_FMT_CLK_NF_IB)
-		|| ((ic->format & I2S_FMT_CLK_FORMAT_MASK) == I2S_FMT_CLK_IF_IB)
-		? SL_HAL_USART_CLOCK_MODE_1
-		: SL_HAL_USART_CLOCK_MODE_0;
+		((ic->format & I2S_FMT_CLK_FORMAT_MASK) == I2S_FMT_CLK_NF_IB) ||
+				((ic->format & I2S_FMT_CLK_FORMAT_MASK) == I2S_FMT_CLK_IF_IB)
+			? SL_HAL_USART_CLOCK_MODE_1
+			: SL_HAL_USART_CLOCK_MODE_0;
 	init.format = SL_HAL_USART_I2S_FORMAT_W16D16;
 	init.justify = SL_HAL_USART_JUSTIFY_LEFT;
 	/*
@@ -510,7 +491,7 @@ static int hw_i2s_apply(const struct device *dev)
 	 * DMASPLIT + dual LDMA (samples on one slot, silence on the other).
 	 */
 	init.mono = false;
-	init.dma_split = data->tx.cfg_valid && tx_cfg_is_mono(&data->tx.cfg);
+	init.dma_split = data->tx.cfg_valid && i2s_silabs_usart_tx_cfg_is_mono(&data->tx.cfg);
 
 	if ((ic->format & I2S_FMT_DATA_FORMAT_MASK) == I2S_FMT_DATA_FORMAT_I2S) {
 		init.delay = true;
@@ -551,7 +532,7 @@ static int hw_i2s_apply(const struct device *dev)
 	return 0;
 }
 
-static k_timeout_t cfg_timeout(int32_t t)
+static k_timeout_t i2s_silabs_usart_cfg_timeout(int32_t t)
 {
 	if (t == SYS_FOREVER_MS) {
 		return K_FOREVER;
@@ -562,31 +543,72 @@ static k_timeout_t cfg_timeout(int32_t t)
 	return SYS_TIMEOUT_MS(t);
 }
 
-/*
- * Forward declarations: configure() in its "off" path (frame_clk_freq == 0)
- * tears down DMA / queues and physically gates the BCLK/LRCLK pins, both of
- * which are implemented further down in this file.
- */
-static void tx_drop(const struct device *dev);
-static void rx_drop(const struct device *dev);
+static void i2s_silabs_usart_tx_drop(const struct device *dev)
+{
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
+	struct i2s_silabs_usart_data *data = dev->data;
+	void *blk;
+	size_t len;
 
-/*
- * Stop / power-down: drop DMA, gate USART clocks, and disable codec MCLK.
- * Caller must hold data->cfg_lock.
- */
-static int configure_power_down(const struct device *dev)
+	if (data->tx.dma.busy) {
+		dma_stop(cfg->dma_dev, (uint32_t)data->tx.dma.channel);
+		data->tx.dma.busy = false;
+	}
+	if (i2s_silabs_usart_tx_path_is_mono(dev) && data->tx_silence.busy) {
+		dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
+		data->tx_silence.busy = false;
+	}
+	if (data->tx.pending != NULL) {
+		i2s_silabs_usart_tx_release_block(&data->tx, data->tx.pending);
+		data->tx.pending = NULL;
+	}
+	if (data->tx.active != NULL) {
+		i2s_silabs_usart_tx_release_block(&data->tx, data->tx.active);
+		data->tx.active = NULL;
+	}
+
+	while (i2s_silabs_usart_block_q_get(&data->tx.q, &blk, &len) == 0) {
+		i2s_silabs_usart_tx_release_block(&data->tx, blk);
+	}
+	data->tx.drain = false;
+}
+
+static void i2s_silabs_usart_rx_drop(const struct device *dev)
+{
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
+	struct i2s_silabs_usart_data *data = dev->data;
+	void *blk;
+	size_t len;
+
+	if (data->rx.dma.busy) {
+		dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
+		data->rx.dma.busy = false;
+	}
+	if (data->rx.active != NULL) {
+		k_mem_slab_free(data->rx.cfg.mem_slab, data->rx.active);
+		data->rx.active = NULL;
+	}
+
+	while (i2s_silabs_usart_block_q_get(&data->rx.q, &blk, &len) == 0) {
+		k_mem_slab_free(data->rx.cfg.mem_slab, blk);
+	}
+	while (k_sem_take(&data->rx.sem, K_NO_WAIT) == 0) {
+	}
+}
+
+static int i2s_silabs_usart_configure_power_down(const struct device *dev)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
 
-	hw_disable_data_irqs(pcfg->base);
-	hw_disable_error_irqs(pcfg->base);
+	i2s_silabs_usart_hw_disable_data_irqs(pcfg->base);
+	i2s_silabs_usart_hw_disable_error_irqs(pcfg->base);
 
 	if (data->tx.cfg_valid) {
-		tx_drop(dev);
+		i2s_silabs_usart_tx_drop(dev);
 	}
 	if (data->rx.cfg_valid) {
-		rx_drop(dev);
+		i2s_silabs_usart_rx_drop(dev);
 	}
 
 	sl_hal_usart_disable(pcfg->base);
@@ -601,49 +623,47 @@ static int configure_power_down(const struct device *dev)
 	return 0;
 }
 
-static int validate_configure_block_size(const struct i2s_config *cfg)
+static int i2s_silabs_usart_validate_configure_block_size(const struct i2s_config *cfg)
 {
-	const uint32_t frame_bytes = ((uint32_t)cfg->word_size / I2S_BITS_PER_BYTE)
-		* (uint32_t)cfg->channels;
+	const uint32_t frame_bytes =
+		((uint32_t)cfg->word_size / BITS_PER_BYTE) * (uint32_t)cfg->channels;
 
-	if (cfg->block_size == 0U || frame_bytes == 0U
-		|| (cfg->block_size % frame_bytes) != 0U
-			|| (cfg->block_size % I2S_DMA_DATA_SIZE) != 0U) {
+	if (cfg->block_size == 0U || frame_bytes == 0U || (cfg->block_size % frame_bytes) != 0U ||
+	    (cfg->block_size % I2S_SILABS_WORD_SIZE_BYTES) != 0U) {
 		return -EINVAL;
 	}
 	return 0;
 }
 
-static bool i2s_cfg_params_mismatch(const struct i2s_config *a, const struct i2s_config *b)
+static bool i2s_silabs_usart_cfg_params_mismatch(const struct i2s_config *a,
+						 const struct i2s_config *b)
 {
-	return (a->frame_clk_freq != b->frame_clk_freq)
-		|| (a->word_size != b->word_size)
-		|| (a->format != b->format)
-		|| (a->channels != b->channels);
+	return (a->frame_clk_freq != b->frame_clk_freq) || (a->word_size != b->word_size) ||
+	       (a->format != b->format) || (a->channels != b->channels);
 }
 
-static bool tx_rx_cfg_mismatch(const struct device *dev, enum i2s_dir dir,
-	const struct i2s_config *cfg)
+static bool i2s_silabs_usart_tx_rx_cfg_mismatch(const struct device *dev, enum i2s_dir dir,
+						const struct i2s_config *cfg)
 {
 	const struct i2s_silabs_usart_data *data = dev->data;
 
 	if (dir == I2S_DIR_TX && data->rx.cfg_valid) {
-		return i2s_cfg_params_mismatch(cfg, &data->rx.cfg);
+		return i2s_silabs_usart_cfg_params_mismatch(cfg, &data->rx.cfg);
 	}
 	if (dir == I2S_DIR_RX && data->tx.cfg_valid) {
-		return i2s_cfg_params_mismatch(cfg, &data->tx.cfg);
+		return i2s_silabs_usart_cfg_params_mismatch(cfg, &data->tx.cfg);
 	}
 
 	return false;
 }
 
-static bool cfg_state_allowed(int32_t state)
+static bool i2s_silabs_usart_cfg_state_allowed(int32_t state)
 {
 	return (state == I2S_STATE_NOT_READY) || (state == I2S_STATE_READY);
 }
 
 static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir,
-	const struct i2s_config *cfg)
+				      const struct i2s_config *cfg)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
@@ -651,17 +671,19 @@ static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir
 
 	k_mutex_lock(&data->cfg_lock, K_FOREVER);
 
-	if ((dir == I2S_DIR_TX || dir == I2S_DIR_BOTH) && !cfg_state_allowed(data->tx.state)) {
+	if ((dir == I2S_DIR_TX || dir == I2S_DIR_BOTH) &&
+	    !i2s_silabs_usart_cfg_state_allowed(data->tx.state)) {
 		err = -EINVAL;
 		goto out;
 	}
-	if ((dir == I2S_DIR_RX || dir == I2S_DIR_BOTH) && !cfg_state_allowed(data->rx.state)) {
+	if ((dir == I2S_DIR_RX || dir == I2S_DIR_BOTH) &&
+	    !i2s_silabs_usart_cfg_state_allowed(data->rx.state)) {
 		err = -EINVAL;
 		goto out;
 	}
 
 	if (cfg == NULL || cfg->frame_clk_freq == 0U) {
-		err = configure_power_down(dev);
+		err = i2s_silabs_usart_configure_power_down(dev);
 		goto out;
 	}
 
@@ -685,7 +707,7 @@ static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir
 		goto out;
 	}
 
-	err = validate_configure_block_size(cfg);
+	err = i2s_silabs_usart_validate_configure_block_size(cfg);
 	if (err < 0) {
 		goto out;
 	}
@@ -695,7 +717,7 @@ static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir
 		goto out;
 	}
 
-	if (tx_rx_cfg_mismatch(dev, dir, cfg)) {
+	if (i2s_silabs_usart_tx_rx_cfg_mismatch(dev, dir, cfg)) {
 		err = -EINVAL;
 		goto out;
 	}
@@ -703,9 +725,6 @@ static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir
 	if (dir == I2S_DIR_TX) {
 		memcpy(&data->tx.cfg, cfg, sizeof(*cfg));
 		data->tx.cfg_valid = true;
-		if (tx_cfg_is_mono(cfg)) {
-			data->mono_tx_slot = pcfg->mono_tx_default;
-		}
 	} else {
 		memcpy(&data->rx.cfg, cfg, sizeof(*cfg));
 		data->rx.cfg_valid = true;
@@ -725,7 +744,7 @@ static int i2s_silabs_usart_configure(const struct device *dev, enum i2s_dir dir
 	/* Enable codec MCLK before BCLK/LRCLK so the codec clock domain is ready. */
 	i2s_silabs_usart_mclk_set(pcfg->mclk_dev, pcfg->mclk_subsys, true);
 
-	err = hw_i2s_apply(dev);
+	err = i2s_silabs_usart_hw_apply(dev);
 	if (err < 0) {
 		i2s_silabs_usart_mclk_set(pcfg->mclk_dev, pcfg->mclk_subsys, false);
 		goto out;
@@ -740,7 +759,7 @@ out:
 }
 
 static const struct i2s_config *i2s_silabs_usart_config_get(const struct device *dev,
-	enum i2s_dir dir)
+							    enum i2s_dir dir)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 
@@ -753,154 +772,29 @@ static const struct i2s_config *i2s_silabs_usart_config_get(const struct device 
 	return NULL;
 }
 
-static void i2s_silabs_usart_dma_tx_cb(const struct device *dma_dev, void *user_data,
-	uint32_t channel,
-	int status)
+static int i2s_silabs_usart_mono_tx_silence_run(const struct device *dev, size_t len, bool append)
 {
-	const struct device *dev = user_data;
-	struct i2s_silabs_usart_data *data = dev->data;
-	struct i2s_silabs_usart_stream *tx = &data->tx;
-	void *done;
-	unsigned int key;
-
-	ARG_UNUSED(dma_dev);
-	ARG_UNUSED(channel);
-
-	if (status < 0) {
-		tx->state = I2S_STATE_ERROR;
-		dma_stop(tx->dma.dma_dev, (uint32_t)tx->dma.channel);
-		tx->dma.busy = false;
-		if (tx_path_is_mono(dev) && data->tx_silence.busy) {
-			dma_stop(data->tx_silence.dma_dev, (uint32_t)data->tx_silence.channel);
-			data->tx_silence.busy = false;
-		}
-		if (tx->pending != NULL) {
-			tx_release_block(tx, tx->pending);
-			tx->pending = NULL;
-		}
-		if (tx->active != NULL) {
-			tx_release_block(tx, tx->active);
-			tx->active = NULL;
-		}
-		return;
-	}
-
-	key = irq_lock();
-	done = tx->active;
-
-	if (tx->pending != NULL) {
-		/*
-		 * silabs_ldma_append_block() chained the pending block: the
-		 * LDMA has already auto-started it via LINKLOAD before this
-		 * callback fires.  Do NOT call dma_stop() -- the channel is
-		 * still running.
-		 */
-		tx->active = tx->pending;
-		tx->pending = NULL;
-	} else {
-		/*
-		 * No block was chained -- DMA is now idle.  Call dma_stop()
-		 * to clear the LDMA driver's internal "busy" atomic so the
-		 * next dma_config() does not fail with -EBUSY.
-		 */
-		dma_stop(tx->dma.dma_dev, (uint32_t)tx->dma.channel);
-		tx->active = NULL;
-		tx->dma.busy = false;
-		if (tx_path_is_mono(dev) && data->tx_silence.busy) {
-			dma_stop(data->tx_silence.dma_dev, (uint32_t)data->tx_silence.channel);
-			data->tx_silence.busy = false;
-		}
-	}
-	irq_unlock(key);
-
-	if (done != NULL) {
-		tx_release_block(tx, done);
-	}
-
-	/*
-	 * STOPPING without drain (I2S_TRIGGER_STOP): do not pull more blocks.
-	 * DRAIN / RUNNING continue via tx_try_start.
-	 */
-	if (tx->state == I2S_STATE_RUNNING || (tx->state == I2S_STATE_STOPPING && tx->drain)) {
-		i2s_silabs_usart_tx_try_start(dev);
-	}
-	tx_finish_stopping_if_quiescent(dev);
-}
-
-static void i2s_silabs_usart_dma_rx_cb(const struct device *dma_dev, void *user_data,
-	uint32_t channel,
-	int status)
-{
-	const struct device *dev = user_data;
 	const struct i2s_silabs_usart_cfg *cfg = dev->config;
-	struct i2s_silabs_usart_data *data = dev->data;
-	void *done;
-	size_t done_len;
-	unsigned int key;
-
-	ARG_UNUSED(dma_dev);
-	ARG_UNUSED(channel);
-
-	if (status < 0) {
-		data->rx.state = I2S_STATE_ERROR;
-		dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
-		done = data->rx.active;
-		data->rx.active = NULL;
-		data->rx.dma.busy = false;
-		if (done != NULL) {
-			k_mem_slab_free(data->rx.cfg.mem_slab, done);
-		}
-		return;
-	}
-
-	dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
-
-	key = irq_lock();
-	done = data->rx.active;
-	done_len = data->rx.cfg.block_size;
-	data->rx.active = NULL;
-	data->rx.dma.busy = false;
-	irq_unlock(key);
-
-	if (done != NULL) {
-		if (block_q_put(&data->rx.q, done, done_len) < 0) {
-			k_mem_slab_free(data->rx.cfg.mem_slab, done);
-			data->rx.state = I2S_STATE_ERROR;
-		} else {
-			k_sem_give(&data->rx.sem);
-		}
-	}
-
-	if (data->rx.state == I2S_STATE_STOPPING) {
-		data->rx.state = I2S_STATE_READY;
-		return;
-	}
-
-	i2s_silabs_usart_rx_try_start(dev);
-}
-
-static int mono_tx_silence_run(const struct device *dev, size_t len, bool append)
-{
 	struct i2s_silabs_usart_data *data = dev->data;
 	struct i2s_silabs_usart_dma *silence = &data->tx_silence;
 	int ret;
 
 	silence->blk_cfg.block_size = len;
-	silence->blk_cfg.source_address = tx_silence_src(dev);
+	silence->blk_cfg.source_address = i2s_silabs_usart_tx_silence_src(dev);
 
 	if (append) {
-		return silabs_ldma_append_block(silence->dma_dev, (uint32_t)silence->channel,
-			&silence->dma_cfg);
+		return silabs_ldma_append_block(cfg->dma_dev, (uint32_t)silence->channel,
+						&silence->dma_cfg);
 	}
 
-	ret = dma_config(silence->dma_dev, (uint32_t)silence->channel, &silence->dma_cfg);
+	ret = dma_config(cfg->dma_dev, (uint32_t)silence->channel, &silence->dma_cfg);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ret = dma_start(silence->dma_dev, (uint32_t)silence->channel);
+	ret = dma_start(cfg->dma_dev, (uint32_t)silence->channel);
 	if (ret < 0) {
-		dma_stop(silence->dma_dev, (uint32_t)silence->channel);
+		dma_stop(cfg->dma_dev, (uint32_t)silence->channel);
 		return ret;
 	}
 
@@ -908,37 +802,36 @@ static int mono_tx_silence_run(const struct device *dev, size_t len, bool append
 	return 0;
 }
 
-static int dma_config_start(const struct device *dev, void *blk)
+static int i2s_silabs_usart_dma_config_start(const struct device *dev, void *blk)
 {
 	const struct i2s_silabs_usart_cfg *cfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
 	struct i2s_silabs_usart_stream *tx = &data->tx;
 	int ret;
 
-	ret = dma_config(tx->dma.dma_dev, (uint32_t)tx->dma.channel,
-		&tx->dma.dma_cfg);
+	ret = dma_config(cfg->dma_dev, (uint32_t)tx->dma.channel, &tx->dma.dma_cfg);
 	if (ret < 0) {
-		if (tx_path_is_mono(dev)) {
-			dma_stop(data->tx_silence.dma_dev, (uint32_t)data->tx_silence.channel);
+		if (i2s_silabs_usart_tx_path_is_mono(dev)) {
+			dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
 			data->tx_silence.busy = false;
 		}
 		tx->dma.busy = false;
 		tx->active = NULL;
-		tx_release_block(tx, blk);
+		i2s_silabs_usart_tx_release_block(tx, blk);
 		tx->state = I2S_STATE_ERROR;
 		return -1;
 	}
 
-	ret = dma_start(tx->dma.dma_dev, (uint32_t)tx->dma.channel);
+	ret = dma_start(cfg->dma_dev, (uint32_t)tx->dma.channel);
 	if (ret < 0) {
 		dma_stop(cfg->dma_dev, (uint32_t)tx->dma.channel);
-		if (tx_path_is_mono(dev)) {
-			dma_stop(data->tx_silence.dma_dev, (uint32_t)data->tx_silence.channel);
+		if (i2s_silabs_usart_tx_path_is_mono(dev)) {
+			dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
 			data->tx_silence.busy = false;
 		}
 		tx->dma.busy = false;
 		tx->active = NULL;
-		tx_release_block(tx, blk);
+		i2s_silabs_usart_tx_release_block(tx, blk);
 		tx->state = I2S_STATE_ERROR;
 		return -1;
 	}
@@ -948,6 +841,7 @@ static int dma_config_start(const struct device *dev, void *blk)
 
 static void i2s_silabs_usart_tx_try_start(const struct device *dev)
 {
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
 	struct i2s_silabs_usart_stream *tx = &data->tx;
 	void *blk = NULL;
@@ -971,11 +865,11 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
 		 * dma_start() cycle.  Cold-start path used by I2S_TRIGGER_START and as
 		 * fallback when the queue was empty.
 		 */
-		ret = block_q_get(&tx->q, &blk, &len);
+		ret = i2s_silabs_usart_block_q_get(&tx->q, &blk, &len);
 		irq_unlock(key);
 
 		if (ret < 0) {
-			tx_finish_stopping_if_quiescent(dev);
+			i2s_silabs_usart_tx_finish_stopping_if_quiescent(dev);
 			return;
 		}
 
@@ -985,18 +879,18 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
 		tx->dma.blk_cfg.source_address = (uintptr_t)blk;
 		tx->dma.blk_cfg.block_size = len;
 
-		if (tx_path_is_mono(dev)) {
-			ret = mono_tx_silence_run(dev, len, false);
+		if (i2s_silabs_usart_tx_path_is_mono(dev)) {
+			ret = i2s_silabs_usart_mono_tx_silence_run(dev, len, false);
 			if (ret < 0) {
 				tx->dma.busy = false;
 				tx->active = NULL;
-				tx_release_block(tx, blk);
+				i2s_silabs_usart_tx_release_block(tx, blk);
 				tx->state = I2S_STATE_ERROR;
 				return;
 			}
 		}
 
-		ret = dma_config_start(dev, blk);
+		ret = i2s_silabs_usart_dma_config_start(dev, blk);
 		if (ret < 0) {
 			return;
 		}
@@ -1017,7 +911,7 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
 	 * The LDMA hardware will seamlessly transition via LINKLOAD, eliminating
 	 * the gap that dma_stop/config/start would introduce.
 	 */
-	ret = block_q_get(&tx->q, &blk, &len);
+	ret = i2s_silabs_usart_block_q_get(&tx->q, &blk, &len);
 	if (ret < 0) {
 		irq_unlock(key);
 		return;
@@ -1026,24 +920,23 @@ static void i2s_silabs_usart_tx_try_start(const struct device *dev)
 	tx->dma.blk_cfg.source_address = (uintptr_t)blk;
 	tx->dma.blk_cfg.block_size = len;
 
-	if (tx_path_is_mono(dev)) {
-		ret = mono_tx_silence_run(dev, len, true);
+	if (i2s_silabs_usart_tx_path_is_mono(dev)) {
+		ret = i2s_silabs_usart_mono_tx_silence_run(dev, len, true);
 		if (ret < 0) {
 			irq_unlock(key);
-			tx_release_block(tx, blk);
+			i2s_silabs_usart_tx_release_block(tx, blk);
 			return;
 		}
 	}
 
-	ret = silabs_ldma_append_block(tx->dma.dma_dev, (uint32_t)tx->dma.channel,
-		&tx->dma.dma_cfg);
+	ret = silabs_ldma_append_block(cfg->dma_dev, (uint32_t)tx->dma.channel, &tx->dma.dma_cfg);
 	if (ret == 0) {
 		tx->pending = blk;
 	}
 	irq_unlock(key);
 
 	if (ret < 0) {
-		tx_release_block(tx, blk);
+		i2s_silabs_usart_tx_release_block(tx, blk);
 	}
 }
 
@@ -1077,7 +970,7 @@ static void i2s_silabs_usart_rx_try_start(const struct device *dev)
 	rx->dma.blk_cfg.dest_address = (uintptr_t)rx->active;
 	rx->dma.blk_cfg.block_size = rx->cfg.block_size;
 
-	ret = dma_config(rx->dma.dma_dev, (uint32_t)rx->dma.channel, &rx->dma.dma_cfg);
+	ret = dma_config(cfg->dma_dev, (uint32_t)rx->dma.channel, &rx->dma.dma_cfg);
 	if (ret < 0) {
 		rx->dma.busy = false;
 		k_mem_slab_free(rx->cfg.mem_slab, rx->active);
@@ -1086,7 +979,7 @@ static void i2s_silabs_usart_rx_try_start(const struct device *dev)
 		return;
 	}
 
-	ret = dma_start(rx->dma.dma_dev, (uint32_t)rx->dma.channel);
+	ret = dma_start(cfg->dma_dev, (uint32_t)rx->dma.channel);
 	if (ret < 0) {
 		dma_stop(cfg->dma_dev, (uint32_t)rx->dma.channel);
 		rx->dma.busy = false;
@@ -1094,6 +987,132 @@ static void i2s_silabs_usart_rx_try_start(const struct device *dev)
 		rx->active = NULL;
 		rx->state = I2S_STATE_ERROR;
 	}
+}
+
+static void i2s_silabs_usart_dma_tx_cb(const struct device *dma_dev, void *user_data,
+				       uint32_t channel, int status)
+{
+	const struct device *dev = user_data;
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
+	struct i2s_silabs_usart_data *data = dev->data;
+	struct i2s_silabs_usart_stream *tx = &data->tx;
+	void *done;
+	unsigned int key;
+
+	ARG_UNUSED(dma_dev);
+	ARG_UNUSED(channel);
+
+	if (status < 0) {
+		tx->state = I2S_STATE_ERROR;
+		dma_stop(cfg->dma_dev, (uint32_t)tx->dma.channel);
+		tx->dma.busy = false;
+		if (i2s_silabs_usart_tx_path_is_mono(dev) && data->tx_silence.busy) {
+			dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
+			data->tx_silence.busy = false;
+		}
+		if (tx->pending != NULL) {
+			i2s_silabs_usart_tx_release_block(tx, tx->pending);
+			tx->pending = NULL;
+		}
+		if (tx->active != NULL) {
+			i2s_silabs_usart_tx_release_block(tx, tx->active);
+			tx->active = NULL;
+		}
+		return;
+	}
+
+	key = irq_lock();
+	done = tx->active;
+
+	if (tx->pending != NULL) {
+		/*
+		 * silabs_ldma_append_block() chained the pending block: the
+		 * LDMA has already auto-started it via LINKLOAD before this
+		 * callback fires.  Do NOT call dma_stop() -- the channel is
+		 * still running.
+		 */
+		tx->active = tx->pending;
+		tx->pending = NULL;
+	} else {
+		/*
+		 * No block was chained -- DMA is now idle.  Call dma_stop()
+		 * to clear the LDMA driver's internal "busy" atomic so the
+		 * next dma_config() does not fail with -EBUSY.
+		 */
+		dma_stop(cfg->dma_dev, (uint32_t)tx->dma.channel);
+		tx->active = NULL;
+		tx->dma.busy = false;
+		if (i2s_silabs_usart_tx_path_is_mono(dev) && data->tx_silence.busy) {
+			dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
+			data->tx_silence.busy = false;
+		}
+	}
+	irq_unlock(key);
+
+	if (done != NULL) {
+		i2s_silabs_usart_tx_release_block(tx, done);
+	}
+
+	/*
+	 * STOPPING without drain (I2S_TRIGGER_STOP): do not pull more blocks.
+	 * DRAIN / RUNNING continue via i2s_silabs_usart_tx_try_start.
+	 */
+	if (tx->state == I2S_STATE_RUNNING || (tx->state == I2S_STATE_STOPPING && tx->drain)) {
+		i2s_silabs_usart_tx_try_start(dev);
+	}
+	i2s_silabs_usart_tx_finish_stopping_if_quiescent(dev);
+}
+
+static void i2s_silabs_usart_dma_rx_cb(const struct device *dma_dev, void *user_data,
+				       uint32_t channel, int status)
+{
+	const struct device *dev = user_data;
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
+	struct i2s_silabs_usart_data *data = dev->data;
+	void *done;
+	size_t done_len;
+	unsigned int key;
+
+	ARG_UNUSED(dma_dev);
+	ARG_UNUSED(channel);
+
+	dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
+
+	key = irq_lock();
+	done = data->rx.active;
+	data->rx.active = NULL;
+	data->rx.dma.busy = false;
+	/*
+	 * DMA error, or RX already ERROR (e.g. USART RXOF aborted mid-block):
+	 * discard the buffer.  Queuing it would advertise a full block_size
+	 * while the contents may only be partially filled.
+	 */
+	if ((status < 0) || (data->rx.state == I2S_STATE_ERROR)) {
+		data->rx.state = I2S_STATE_ERROR;
+		irq_unlock(key);
+		if (done != NULL) {
+			k_mem_slab_free(data->rx.cfg.mem_slab, done);
+		}
+		return;
+	}
+	done_len = data->rx.cfg.block_size;
+	irq_unlock(key);
+
+	if (done != NULL) {
+		if (i2s_silabs_usart_block_q_put(&data->rx.q, done, done_len) < 0) {
+			k_mem_slab_free(data->rx.cfg.mem_slab, done);
+			data->rx.state = I2S_STATE_ERROR;
+		} else {
+			k_sem_give(&data->rx.sem);
+		}
+	}
+
+	if (data->rx.state == I2S_STATE_STOPPING) {
+		data->rx.state = I2S_STATE_READY;
+		return;
+	}
+
+	i2s_silabs_usart_rx_try_start(dev);
 }
 
 static int i2s_silabs_usart_read(const struct device *dev, void **mem_block, size_t *size)
@@ -1108,14 +1127,14 @@ static int i2s_silabs_usart_read(const struct device *dev, void **mem_block, siz
 		return -EIO;
 	}
 
-	ret = k_sem_take(&data->rx.sem, cfg_timeout(data->rx.cfg.timeout));
+	ret = k_sem_take(&data->rx.sem, i2s_silabs_usart_cfg_timeout(data->rx.cfg.timeout));
 	if (ret < 0) {
 		return ret;
 	}
 
 	key = irq_lock();
 
-	ret = block_q_get(&data->rx.q, &blk, &len);
+	ret = i2s_silabs_usart_block_q_get(&data->rx.q, &blk, &len);
 	irq_unlock(key);
 
 	if (ret < 0) {
@@ -1141,23 +1160,22 @@ static int i2s_silabs_usart_write(const struct device *dev, void *mem_block, siz
 		return -EIO;
 	}
 
-	tx_frame_bytes = ((uint32_t)data->tx.cfg.word_size / I2S_BITS_PER_BYTE)
-		* (uint32_t)data->tx.cfg.channels;
+	tx_frame_bytes = ((uint32_t)data->tx.cfg.word_size / BITS_PER_BYTE) *
+			 (uint32_t)data->tx.cfg.channels;
 
-	if (size == 0U || size > data->tx.cfg.block_size || tx_frame_bytes == 0U
-		|| (size % tx_frame_bytes) != 0U
-			|| (size % I2S_DMA_DATA_SIZE) != 0U) {
+	if (size == 0U || size > data->tx.cfg.block_size || tx_frame_bytes == 0U ||
+	    (size % tx_frame_bytes) != 0U || (size % I2S_SILABS_WORD_SIZE_BYTES) != 0U) {
 		return -EINVAL;
 	}
 
-	ret = k_sem_take(&data->tx.sem, cfg_timeout(data->tx.cfg.timeout));
+	ret = k_sem_take(&data->tx.sem, i2s_silabs_usart_cfg_timeout(data->tx.cfg.timeout));
 	if (ret < 0) {
 		return ret;
 	}
 
 	key = irq_lock();
 
-	ret = block_q_put(&data->tx.q, mem_block, size);
+	ret = i2s_silabs_usart_block_q_put(&data->tx.q, mem_block, size);
 	irq_unlock(key);
 
 	if (ret < 0) {
@@ -1172,60 +1190,7 @@ static int i2s_silabs_usart_write(const struct device *dev, void *mem_block, siz
 	return 0;
 }
 
-static void tx_drop(const struct device *dev)
-{
-	const struct i2s_silabs_usart_cfg *cfg = dev->config;
-	struct i2s_silabs_usart_data *data = dev->data;
-	void *blk;
-	size_t len;
-
-	if (data->tx.dma.busy) {
-		dma_stop(cfg->dma_dev, (uint32_t)data->tx.dma.channel);
-		data->tx.dma.busy = false;
-	}
-	if (tx_path_is_mono(dev) && data->tx_silence.busy) {
-		dma_stop(cfg->dma_dev, (uint32_t)data->tx_silence.channel);
-		data->tx_silence.busy = false;
-	}
-	if (data->tx.pending != NULL) {
-		tx_release_block(&data->tx, data->tx.pending);
-		data->tx.pending = NULL;
-	}
-	if (data->tx.active != NULL) {
-		tx_release_block(&data->tx, data->tx.active);
-		data->tx.active = NULL;
-	}
-
-	while (block_q_get(&data->tx.q, &blk, &len) == 0) {
-		tx_release_block(&data->tx, blk);
-	}
-	data->tx.drain = false;
-}
-
-static void rx_drop(const struct device *dev)
-{
-	const struct i2s_silabs_usart_cfg *cfg = dev->config;
-	struct i2s_silabs_usart_data *data = dev->data;
-	void *blk;
-	size_t len;
-
-	if (data->rx.dma.busy) {
-		dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
-		data->rx.dma.busy = false;
-	}
-	if (data->rx.active != NULL) {
-		k_mem_slab_free(data->rx.cfg.mem_slab, data->rx.active);
-		data->rx.active = NULL;
-	}
-
-	while (block_q_get(&data->rx.q, &blk, &len) == 0) {
-		k_mem_slab_free(data->rx.cfg.mem_slab, blk);
-	}
-	while (k_sem_take(&data->rx.sem, K_NO_WAIT) == 0) {
-	}
-}
-
-static int trigger_start(const struct device *dev, enum i2s_dir dir)
+static int i2s_silabs_usart_trigger_start(const struct device *dev, enum i2s_dir dir)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 
@@ -1247,7 +1212,7 @@ static int trigger_start(const struct device *dev, enum i2s_dir dir)
 	return 0;
 }
 
-static int trigger_stop(const struct device *dev, enum i2s_dir dir)
+static int i2s_silabs_usart_trigger_stop(const struct device *dev, enum i2s_dir dir)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 
@@ -1264,7 +1229,7 @@ static int trigger_stop(const struct device *dev, enum i2s_dir dir)
 			data->tx.state = I2S_STATE_READY;
 		} else {
 			data->tx.state = I2S_STATE_STOPPING;
-			tx_finish_stopping_if_quiescent(dev);
+			i2s_silabs_usart_tx_finish_stopping_if_quiescent(dev);
 		}
 	}
 	if (dir == I2S_DIR_RX && data->rx.cfg_valid) {
@@ -1284,7 +1249,7 @@ static int trigger_stop(const struct device *dev, enum i2s_dir dir)
 	return 0;
 }
 
-static int trigger_drain(const struct device *dev, enum i2s_dir dir)
+static int i2s_silabs_usart_trigger_drain(const struct device *dev, enum i2s_dir dir)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 
@@ -1295,52 +1260,50 @@ static int trigger_drain(const struct device *dev, enum i2s_dir dir)
 		data->tx.drain = true;
 		data->tx.state = I2S_STATE_STOPPING;
 		i2s_silabs_usart_tx_try_start(dev);
-		tx_finish_stopping_if_quiescent(dev);
+		i2s_silabs_usart_tx_finish_stopping_if_quiescent(dev);
 		return 0;
 	}
 	/* Per I2S API, DRAIN on RX has the same effect as STOP. */
 	if (dir == I2S_DIR_RX && data->rx.cfg_valid) {
-		return trigger_stop(dev, I2S_DIR_RX);
+		return i2s_silabs_usart_trigger_stop(dev, I2S_DIR_RX);
 	}
 	return -EINVAL;
 }
 
-static int trigger_drop(const struct device *dev, enum i2s_dir dir)
+static int i2s_silabs_usart_trigger_drop(const struct device *dev, enum i2s_dir dir)
 {
 	const struct i2s_silabs_usart_cfg *pcfg = dev->config;
 	struct i2s_silabs_usart_data *data = dev->data;
 
-	hw_disable_data_irqs(pcfg->base);
+	i2s_silabs_usart_hw_disable_data_irqs(pcfg->base);
 	if (dir == I2S_DIR_TX || dir == I2S_DIR_BOTH) {
-		tx_drop(dev);
+		i2s_silabs_usart_tx_drop(dev);
 		data->tx.state = data->tx.cfg_valid ? I2S_STATE_READY : I2S_STATE_NOT_READY;
 	}
 	if (dir == I2S_DIR_RX || dir == I2S_DIR_BOTH) {
-		rx_drop(dev);
+		i2s_silabs_usart_rx_drop(dev);
 		data->rx.state = data->rx.cfg_valid ? I2S_STATE_READY : I2S_STATE_NOT_READY;
 	}
 	return 0;
 }
 
-static int trigger_prepare(const struct device *dev, enum i2s_dir dir)
+static int i2s_silabs_usart_trigger_prepare(const struct device *dev, enum i2s_dir dir)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 
-	if ((dir == I2S_DIR_TX || dir == I2S_DIR_BOTH)
-		&& data->tx.state != I2S_STATE_ERROR) {
+	if ((dir == I2S_DIR_TX || dir == I2S_DIR_BOTH) && data->tx.state != I2S_STATE_ERROR) {
 		return -EINVAL;
 	}
-	if ((dir == I2S_DIR_RX || dir == I2S_DIR_BOTH)
-		&& data->rx.state != I2S_STATE_ERROR) {
+	if ((dir == I2S_DIR_RX || dir == I2S_DIR_BOTH) && data->rx.state != I2S_STATE_ERROR) {
 		return -EINVAL;
 	}
 
 	if (dir == I2S_DIR_TX || dir == I2S_DIR_BOTH) {
-		tx_drop(dev);
+		i2s_silabs_usart_tx_drop(dev);
 		data->tx.state = data->tx.cfg_valid ? I2S_STATE_READY : I2S_STATE_NOT_READY;
 	}
 	if (dir == I2S_DIR_RX || dir == I2S_DIR_BOTH) {
-		rx_drop(dev);
+		i2s_silabs_usart_rx_drop(dev);
 		data->rx.state = data->rx.cfg_valid ? I2S_STATE_READY : I2S_STATE_NOT_READY;
 	}
 
@@ -1348,7 +1311,7 @@ static int trigger_prepare(const struct device *dev, enum i2s_dir dir)
 }
 
 static int i2s_silabs_usart_trigger(const struct device *dev, enum i2s_dir dir,
-	enum i2s_trigger_cmd cmd)
+				    enum i2s_trigger_cmd cmd)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
 	int err = 0;
@@ -1357,19 +1320,19 @@ static int i2s_silabs_usart_trigger(const struct device *dev, enum i2s_dir dir,
 
 	switch (cmd) {
 	case I2S_TRIGGER_START:
-		err = trigger_start(dev, dir);
+		err = i2s_silabs_usart_trigger_start(dev, dir);
 		break;
 	case I2S_TRIGGER_STOP:
-		err = trigger_stop(dev, dir);
+		err = i2s_silabs_usart_trigger_stop(dev, dir);
 		break;
 	case I2S_TRIGGER_DRAIN:
-		err = trigger_drain(dev, dir);
+		err = i2s_silabs_usart_trigger_drain(dev, dir);
 		break;
 	case I2S_TRIGGER_DROP:
-		err = trigger_drop(dev, dir);
+		err = i2s_silabs_usart_trigger_drop(dev, dir);
 		break;
 	case I2S_TRIGGER_PREPARE:
-		err = trigger_prepare(dev, dir);
+		err = i2s_silabs_usart_trigger_prepare(dev, dir);
 		break;
 	default:
 		err = -EINVAL;
@@ -1401,9 +1364,24 @@ static void i2s_silabs_usart_isr(const void *arg)
 	}
 
 	if (flags & USART_IF_RXOF) {
+		void *done;
+		unsigned int key;
+
+		/*
+		 * Overflow aborts the current RX DMA block.  Drop the active
+		 * slab so a late DMA callback cannot queue a partial buffer
+		 * advertised as a full block_size.
+		 */
 		data->rx.state = I2S_STATE_ERROR;
 		dma_stop(cfg->dma_dev, (uint32_t)data->rx.dma.channel);
+		key = irq_lock();
+		done = data->rx.active;
+		data->rx.active = NULL;
 		data->rx.dma.busy = false;
+		irq_unlock(key);
+		if (done != NULL) {
+			k_mem_slab_free(data->rx.cfg.mem_slab, done);
+		}
 		sl_hal_usart_clear_interrupts(cfg->base, USART_IF_RXOF);
 	}
 }
@@ -1417,11 +1395,12 @@ static int i2s_silabs_usart_init(const struct device *dev)
 
 	k_mutex_init(&data->cfg_lock);
 	k_msgq_init(&data->tx.q, data->tx.q_buf, sizeof(struct i2s_silabs_usart_block),
-		I2S_SILABS_TX_BLOCK_Q_DEPTH);
+		    CONFIG_I2S_SILABS_USART_TX_BLOCK_COUNT);
 	k_msgq_init(&data->rx.q, data->rx.q_buf, sizeof(struct i2s_silabs_usart_block),
-		I2S_SILABS_RX_BLOCK_Q_DEPTH);
-	k_sem_init(&data->tx.sem, I2S_SILABS_TX_BLOCK_Q_DEPTH, I2S_SILABS_TX_BLOCK_Q_DEPTH);
-	k_sem_init(&data->rx.sem, 0, I2S_SILABS_RX_BLOCK_Q_DEPTH);
+		    CONFIG_I2S_SILABS_USART_RX_BLOCK_COUNT);
+	k_sem_init(&data->tx.sem, CONFIG_I2S_SILABS_USART_TX_BLOCK_COUNT,
+		   CONFIG_I2S_SILABS_USART_TX_BLOCK_COUNT);
+	k_sem_init(&data->rx.sem, 0, CONFIG_I2S_SILABS_USART_RX_BLOCK_COUNT);
 
 	if (!device_is_ready(cfg->dma_dev)) {
 		return -ENODEV;
@@ -1435,9 +1414,6 @@ static int i2s_silabs_usart_init(const struct device *dev)
 	if (err < 0 && err != -EALREADY) {
 		return err;
 	}
-
-	data->tx.dma.dma_dev = cfg->dma_dev;
-	data->tx_silence.dma_dev = cfg->dma_dev;
 
 	if (cfg->has_tx_split) {
 		data->tx_silence.channel = dma_request_channel(cfg->dma_dev, NULL);
@@ -1458,7 +1434,6 @@ static int i2s_silabs_usart_init(const struct device *dev)
 		}
 	}
 
-	data->rx.dma.dma_dev = cfg->dma_dev;
 	data->rx.dma.channel = dma_request_channel(cfg->dma_dev, NULL);
 	if (data->rx.dma.channel < 0) {
 		dma_release_channel(cfg->dma_dev, (uint32_t)data->tx.dma.channel);
@@ -1469,16 +1444,16 @@ static int i2s_silabs_usart_init(const struct device *dev)
 	}
 
 	/*
-	 * Provisional DMA defaults for 16-bit words. apply_dma_xfer_size()
+	 * Provisional DMA defaults for 16-bit words. i2s_silabs_usart_apply_dma_xfer_size()
 	 * keeps these consistent when configure() runs.
 	 */
 	memset(&data->tx.dma.dma_cfg, 0, sizeof(data->tx.dma.dma_cfg));
 	data->tx.dma.dma_cfg.dma_slot = cfg->dma_txbl_slot;
 	data->tx.dma.dma_cfg.channel_direction = MEMORY_TO_PERIPHERAL;
-	data->tx.dma.dma_cfg.source_data_size = I2S_DMA_DATA_SIZE;
-	data->tx.dma.dma_cfg.dest_data_size = I2S_DMA_DATA_SIZE;
-	data->tx.dma.dma_cfg.source_burst_length = I2S_DMA_DATA_SIZE;
-	data->tx.dma.dma_cfg.dest_burst_length = I2S_DMA_DATA_SIZE;
+	data->tx.dma.dma_cfg.source_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	data->tx.dma.dma_cfg.dest_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	data->tx.dma.dma_cfg.source_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
+	data->tx.dma.dma_cfg.dest_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
 	data->tx.dma.dma_cfg.head_block = &data->tx.dma.blk_cfg;
 	data->tx.dma.dma_cfg.user_data = (void *)dev;
 	data->tx.dma.dma_cfg.dma_callback = i2s_silabs_usart_dma_tx_cb;
@@ -1494,10 +1469,10 @@ static int i2s_silabs_usart_init(const struct device *dev)
 		memset(&data->tx_silence.dma_cfg, 0, sizeof(data->tx_silence.dma_cfg));
 		data->tx_silence.dma_cfg.dma_slot = cfg->dma_txbl_slot;
 		data->tx_silence.dma_cfg.channel_direction = MEMORY_TO_PERIPHERAL;
-		data->tx_silence.dma_cfg.source_data_size = I2S_DMA_DATA_SIZE;
-		data->tx_silence.dma_cfg.dest_data_size = I2S_DMA_DATA_SIZE;
-		data->tx_silence.dma_cfg.source_burst_length = I2S_DMA_DATA_SIZE;
-		data->tx_silence.dma_cfg.dest_burst_length = I2S_DMA_DATA_SIZE;
+		data->tx_silence.dma_cfg.source_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+		data->tx_silence.dma_cfg.dest_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+		data->tx_silence.dma_cfg.source_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
+		data->tx_silence.dma_cfg.dest_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
 		data->tx_silence.dma_cfg.head_block = &data->tx_silence.blk_cfg;
 		data->tx_silence.dma_cfg.channel_priority = I2S_DMA_CHANNEL_PRIORITY;
 		data->tx_silence.dma_cfg.complete_callback_en = 0U;
@@ -1511,10 +1486,10 @@ static int i2s_silabs_usart_init(const struct device *dev)
 	memset(&data->rx.dma.dma_cfg, 0, sizeof(data->rx.dma.dma_cfg));
 	data->rx.dma.dma_cfg.dma_slot = cfg->dma_rx_slot;
 	data->rx.dma.dma_cfg.channel_direction = PERIPHERAL_TO_MEMORY;
-	data->rx.dma.dma_cfg.source_data_size = I2S_DMA_DATA_SIZE;
-	data->rx.dma.dma_cfg.dest_data_size = I2S_DMA_DATA_SIZE;
-	data->rx.dma.dma_cfg.source_burst_length = I2S_DMA_DATA_SIZE;
-	data->rx.dma.dma_cfg.dest_burst_length = I2S_DMA_DATA_SIZE;
+	data->rx.dma.dma_cfg.source_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	data->rx.dma.dma_cfg.dest_data_size = I2S_SILABS_WORD_SIZE_BYTES;
+	data->rx.dma.dma_cfg.source_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
+	data->rx.dma.dma_cfg.dest_burst_length = I2S_SILABS_WORD_SIZE_BYTES;
 	data->rx.dma.dma_cfg.head_block = &data->rx.dma.blk_cfg;
 	data->rx.dma.dma_cfg.user_data = (void *)dev;
 	data->rx.dma.dma_cfg.dma_callback = i2s_silabs_usart_dma_rx_cb;
@@ -1525,8 +1500,8 @@ static int i2s_silabs_usart_init(const struct device *dev)
 	data->rx.dma.blk_cfg.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
 	data->rx.dma.blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_INCREMENT;
 
-	hw_disable_data_irqs(base);
-	hw_disable_error_irqs(base);
+	i2s_silabs_usart_hw_disable_data_irqs(base);
+	i2s_silabs_usart_hw_disable_error_irqs(base);
 	sl_hal_usart_enable_interrupts(base, USART_IF_RXOF | USART_IF_TXUF);
 
 	cfg->irq_connect(dev);
@@ -1541,91 +1516,75 @@ static DEVICE_API(i2s, i2s_silabs_usart_driver_api) = {
 	.trigger = i2s_silabs_usart_trigger,
 };
 
-#define I2S_SILABS_USART_IRQ_CONNECT(idx)                                                  \
-	static void i2s_silabs_usart_irq_connect_##idx(const struct device *dev)               \
-	{                                                                                      \
-	ARG_UNUSED(dev);                                                                       \
-	IRQ_CONNECT(DT_INST_IRQ_BY_NAME(idx, rx, irq), DT_INST_IRQ_BY_NAME(idx, rx, priority), \
-	i2s_silabs_usart_isr, DEVICE_DT_INST_GET(idx), 0);                                \
-	IRQ_CONNECT(DT_INST_IRQ_BY_NAME(idx, tx, irq), DT_INST_IRQ_BY_NAME(idx, tx, priority), \
-	i2s_silabs_usart_isr, DEVICE_DT_INST_GET(idx), 0);                                \
-	irq_enable(DT_INST_IRQ_BY_NAME(idx, rx, irq));                                         \
-	irq_enable(DT_INST_IRQ_BY_NAME(idx, tx, irq));                                         \
+#define I2S_SILABS_USART_IRQ_CONNECT(idx)                                                          \
+	static void i2s_silabs_usart_irq_connect_##idx(const struct device *dev)                   \
+	{                                                                                          \
+		ARG_UNUSED(dev);                                                                   \
+		IRQ_CONNECT(DT_INST_IRQ_BY_NAME(idx, rx, irq),                                     \
+			    DT_INST_IRQ_BY_NAME(idx, rx, priority), i2s_silabs_usart_isr,          \
+			    DEVICE_DT_INST_GET(idx), 0);                                           \
+		IRQ_CONNECT(DT_INST_IRQ_BY_NAME(idx, tx, irq),                                     \
+			    DT_INST_IRQ_BY_NAME(idx, tx, priority), i2s_silabs_usart_isr,          \
+			    DEVICE_DT_INST_GET(idx), 0);                                           \
+		irq_enable(DT_INST_IRQ_BY_NAME(idx, rx, irq));                                     \
+		irq_enable(DT_INST_IRQ_BY_NAME(idx, tx, irq));                                     \
 	}
 
-/*
- * silabs,mclk-out = <&clkoutN> under silabs,series-clock-output → parent
- * device + child reg as subsystem.
- */
-#define I2S_SILABS_USART_MCLK_NODE(idx) DT_INST_PHANDLE(idx, silabs_mclk_out)
-
-#define I2S_SILABS_USART_MCLK_DEV(idx)                                                         \
-	COND_CODE_1(DT_INST_NODE_HAS_PROP(idx, silabs_mclk_out),                               \
-	(DEVICE_DT_GET(DT_PARENT(I2S_SILABS_USART_MCLK_NODE(idx)))),                   \
-	(NULL))
-
-#define I2S_SILABS_USART_MCLK_SUBSYS(idx)                                                      \
-	COND_CODE_1(DT_INST_NODE_HAS_PROP(idx, silabs_mclk_out),                               \
-		((clock_control_subsys_t)(uintptr_t)DT_REG_ADDR(                               \
-		I2S_SILABS_USART_MCLK_NODE(idx))),                                     \
-		(NULL))
-
-#define I2S_SILABS_USART_HAS_TXBL_DMA(idx) \
-	(DT_INST_DMAS_HAS_NAME(idx, txbl) || DT_INST_DMAS_HAS_NAME(idx, tx))
-
-#define I2S_SILABS_USART_HAS_TXBLRIGHT_DMA(idx) \
-	(DT_INST_DMAS_HAS_NAME(idx, txblright) || DT_INST_DMAS_HAS_NAME(idx, tx_right))
-
-#define I2S_SILABS_USART_HAS_TX_SPLIT(idx) \
-	(I2S_SILABS_USART_HAS_TXBL_DMA(idx) && I2S_SILABS_USART_HAS_TXBLRIGHT_DMA(idx))
-
-#define I2S_SILABS_USART_TXBL_DMA_NAME(idx) \
+/* Prefer "txbl"; accept legacy "tx". */
+#define I2S_SILABS_USART_TXBL_DMA_NAME(idx)                                                        \
 	COND_CODE_1(DT_INST_DMAS_HAS_NAME(idx, txbl), (txbl), (tx))
 
-#define I2S_SILABS_USART_TXBLRIGHT_DMA_NAME(idx) \
-	COND_CODE_1(DT_INST_DMAS_HAS_NAME(idx, txblright), (txblright), (tx_right))
+/*
+ * Optional codec MCLK from silabs,mclk-out → clock-output@N under
+ * silabs,series-clock-output (parent device + child reg as subsystem).
+ */
+#define I2S_SILABS_USART_MCLK_INIT(idx)                                                            \
+	COND_CODE_1(                                                                               \
+		DT_INST_NODE_HAS_PROP(idx, silabs_mclk_out),                                       \
+		(.mclk_dev = DEVICE_DT_GET(                                                        \
+			 DT_PARENT(DT_INST_PHANDLE(idx, silabs_mclk_out))),                        \
+		 .mclk_subsys = (clock_control_subsys_t)(uintptr_t)DT_REG_ADDR(                    \
+			 DT_INST_PHANDLE(idx, silabs_mclk_out)),),                                 \
+		(.mclk_dev = NULL, .mclk_subsys = NULL,))
 
-#define I2S_SILABS_USART_DMA_TXBL_SLOT(idx)                   \
-	SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(idx, \
-		I2S_SILABS_USART_TXBL_DMA_NAME(idx), \
-		slot))
+#define I2S_SILABS_USART_DMA_INIT(idx)                                                             \
+	.dma_dev = DEVICE_DT_GET(                                                                  \
+		DT_INST_DMAS_CTLR_BY_NAME(idx, I2S_SILABS_USART_TXBL_DMA_NAME(idx))),              \
+	.dma_txbl_slot = SILABS_LDMA_REQSEL_TO_SLOT(                                               \
+		DT_INST_DMAS_CELL_BY_NAME(idx, I2S_SILABS_USART_TXBL_DMA_NAME(idx), slot)),        \
+	.dma_txblright_slot = COND_CODE_1(                                                         \
+		DT_INST_DMAS_HAS_NAME(idx, txblright),                                             \
+		(SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(idx, txblright, slot))),     \
+		(COND_CODE_1(DT_INST_DMAS_HAS_NAME(idx, tx_right),                                 \
+			     (SILABS_LDMA_REQSEL_TO_SLOT(                                          \
+				     DT_INST_DMAS_CELL_BY_NAME(idx, tx_right, slot))),             \
+			     (0U)))),                                                              \
+	.dma_rx_slot = SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(idx, rx, slot)),       \
+	.has_tx_split = ((DT_INST_DMAS_HAS_NAME(idx, txbl) || DT_INST_DMAS_HAS_NAME(idx, tx)) &&   \
+			 (DT_INST_DMAS_HAS_NAME(idx, txblright) ||                                 \
+			  DT_INST_DMAS_HAS_NAME(idx, tx_right))),
 
-#define I2S_SILABS_USART_DMA_TXBLRIGHT_SLOT(idx)                                           \
-	COND_CODE_1(DT_INST_DMAS_HAS_NAME(idx, txblright),                                     \
-		(SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(idx, txblright, slot))), \
-		(COND_CODE_1(DT_INST_DMAS_HAS_NAME(idx, tx_right),                             \
-		(SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(            \
-		idx, tx_right, slot))),             \
-		(0U))))
+#define I2S_SILABS_USART_MONO_TX_INIT(idx)                                                         \
+	.mono_tx_default = COND_CODE_1(DT_INST_NODE_HAS_PROP(idx, silabs_mono_tx_slot),            \
+				       (DT_INST_ENUM_IDX(idx, silabs_mono_tx_slot)),               \
+				       (I2S_SILABS_USART_MONO_TX_SLOT_RIGHT)),
 
-#define I2S_SILABS_USART_MONO_TX_DEFAULT(idx)                         \
-	COND_CODE_1(DT_INST_NODE_HAS_PROP(idx, silabs_mono_tx_slot), \
-			(DT_INST_ENUM_IDX(idx, silabs_mono_tx_slot)), \
-			(I2S_SILABS_USART_MONO_TX_SLOT_RIGHT))
-
-#define I2S_SILABS_USART_DEFINE(idx)                                             \
-	I2S_SILABS_USART_IRQ_CONNECT(idx);                                           \
-	PINCTRL_DT_INST_DEFINE(idx);                                                 \
-	static const struct i2s_silabs_usart_cfg i2s_silabs_usart_cfg_##idx = {      \
-		.base = (USART_TypeDef *)DT_INST_REG_ADDR(idx),                          \
-		.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(idx)),                    \
-		.clock_cfg = SILABS_DT_INST_CLOCK_CFG(idx),                              \
-		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(idx),                             \
-		.irq_connect = i2s_silabs_usart_irq_connect_##idx,                       \
-		.dma_dev = DEVICE_DT_GET(DT_INST_DMAS_CTLR_BY_NAME(idx, \
-			I2S_SILABS_USART_TXBL_DMA_NAME(idx))), \
-		.dma_txbl_slot = I2S_SILABS_USART_DMA_TXBL_SLOT(idx), \
-		.dma_txblright_slot = I2S_SILABS_USART_DMA_TXBLRIGHT_SLOT(idx), \
-		.dma_rx_slot = SILABS_LDMA_REQSEL_TO_SLOT(DT_INST_DMAS_CELL_BY_NAME(idx, \
-			rx, slot)), \
-		.mclk_dev = I2S_SILABS_USART_MCLK_DEV(idx),  \
-		.mclk_subsys = I2S_SILABS_USART_MCLK_SUBSYS(idx), \
-		.has_tx_split = I2S_SILABS_USART_HAS_TX_SPLIT(idx), \
-		.mono_tx_default = I2S_SILABS_USART_MONO_TX_DEFAULT(idx), \
-	};                                                            \
-	static struct i2s_silabs_usart_data i2s_silabs_usart_data_##idx; \
-	DEVICE_DT_INST_DEFINE(idx, i2s_silabs_usart_init, NULL, &i2s_silabs_usart_data_##idx, \
-		&i2s_silabs_usart_cfg_##idx, POST_KERNEL, CONFIG_I2S_INIT_PRIORITY,        \
-		&i2s_silabs_usart_driver_api);
+#define I2S_SILABS_USART_DEFINE(idx)                                                               \
+	I2S_SILABS_USART_IRQ_CONNECT(idx);                                                         \
+	PINCTRL_DT_INST_DEFINE(idx);                                                               \
+	static const struct i2s_silabs_usart_cfg i2s_silabs_usart_cfg_##idx = {                    \
+		.base = (USART_TypeDef *)DT_INST_REG_ADDR(idx),                                    \
+		.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(idx)),                              \
+		.clock_cfg = SILABS_DT_INST_CLOCK_CFG(idx),                                        \
+		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(idx),                                       \
+		.irq_connect = i2s_silabs_usart_irq_connect_##idx,                                 \
+		I2S_SILABS_USART_DMA_INIT(idx)                                                     \
+		I2S_SILABS_USART_MCLK_INIT(idx)                                                    \
+		I2S_SILABS_USART_MONO_TX_INIT(idx)                                                 \
+	};                                                                                         \
+	static struct i2s_silabs_usart_data i2s_silabs_usart_data_##idx;                           \
+	DEVICE_DT_INST_DEFINE(idx, i2s_silabs_usart_init, NULL, &i2s_silabs_usart_data_##idx,      \
+			      &i2s_silabs_usart_cfg_##idx, POST_KERNEL, CONFIG_I2S_INIT_PRIORITY,  \
+			      &i2s_silabs_usart_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(I2S_SILABS_USART_DEFINE)
