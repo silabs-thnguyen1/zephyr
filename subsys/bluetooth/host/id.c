@@ -242,7 +242,8 @@ static void adv_rpa_expired(struct bt_le_ext_adv *adv, void *data)
 		}
 		bool *rpa_invalid_set_ptr = data;
 
-		if (!rpa_invalid) {
+		/* NULL when limited advertising ends, which rotates no shared RPA */
+		if (!rpa_invalid && rpa_invalid_set_ptr != NULL) {
 			rpa_invalid_set_ptr[adv->id] = false;
 		}
 	} else {
@@ -415,7 +416,7 @@ static int adv_rpa_get(struct bt_le_ext_adv *adv, bt_addr_t *rpa)
 }
 #endif /* defined(CONFIG_BT_RPA_SHARING) */
 
-int bt_id_set_adv_private_addr(struct bt_le_ext_adv *adv)
+int bt_id_set_adv_private_addr(struct bt_le_ext_adv *adv, uint32_t options)
 {
 	bt_addr_t rpa;
 	int err;
@@ -425,7 +426,7 @@ int bt_id_set_adv_private_addr(struct bt_le_ext_adv *adv)
 	}
 
 	if (IS_ENABLED(CONFIG_BT_PRIVACY) &&
-	    (adv->options & BT_LE_ADV_OPT_USE_NRPA)) {
+	    (options & BT_LE_ADV_OPT_USE_NRPA)) {
 		bt_addr_le_t addr;
 
 		err = bt_addr_le_create_nrpa(&addr);
@@ -526,10 +527,12 @@ int bt_id_set_private_addr(uint8_t id)
 	return 0;
 }
 
-int bt_id_set_adv_private_addr(struct bt_le_ext_adv *adv)
+int bt_id_set_adv_private_addr(struct bt_le_ext_adv *adv, uint32_t options)
 {
 	bt_addr_t nrpa;
 	int err;
+
+	ARG_UNUSED(options);
 
 	if (adv == NULL) {
 		return -EINVAL;
@@ -598,7 +601,7 @@ static void adv_enable_rpa(struct bt_le_ext_adv *adv, void *data)
 	if (atomic_test_and_clear_bit(adv->flags, BT_ADV_RPA_UPDATE)) {
 		int err;
 
-		err = bt_id_set_adv_private_addr(adv);
+		err = bt_id_set_adv_private_addr(adv, adv->options);
 		if (err) {
 			LOG_WRN("Failed to update advertiser RPA address (%d)", err);
 		}
@@ -1479,6 +1482,28 @@ int bt_id_create(bt_addr_le_t *addr, uint8_t *irk)
 	return new_id;
 }
 
+static void id_conn_disconnect(struct bt_conn *conn, void *data)
+{
+	const uint8_t *id = data;
+	int err;
+
+	if (conn->id != *id) {
+		return;
+	}
+
+	err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	if (err != 0 && err != -ENOTCONN) {
+		LOG_WRN("Failed to disconnect %p (err %d)", conn, err);
+	}
+}
+
+static void id_disconnect_conns(uint8_t id)
+{
+	if (IS_ENABLED(CONFIG_BT_CONN)) {
+		bt_conn_foreach(BT_CONN_TYPE_LE, id_conn_disconnect, &id);
+	}
+}
+
 int bt_id_reset(uint8_t id, bt_addr_le_t *addr, uint8_t *irk)
 {
 	int err;
@@ -1523,6 +1548,8 @@ int bt_id_reset(uint8_t id, bt_addr_le_t *addr, uint8_t *irk)
 		}
 	}
 
+	id_disconnect_conns(id);
+
 	err = id_create(id, addr, irk);
 	if (err) {
 		return err;
@@ -1561,6 +1588,8 @@ int bt_id_delete(uint8_t id)
 			return err;
 		}
 	}
+
+	id_disconnect_conns(id);
 
 #if defined(CONFIG_BT_PRIVACY)
 	(void)memset(bt_dev.irk[id], 0, 16);
@@ -2083,7 +2112,7 @@ int bt_id_set_adv_own_addr(struct bt_le_ext_adv *adv, uint32_t options,
 			return -EINVAL;
 		}
 
-		err = bt_id_set_adv_private_addr(adv);
+		err = bt_id_set_adv_private_addr(adv, options);
 		if (err) {
 			return err;
 		}
@@ -2100,7 +2129,7 @@ int bt_id_set_adv_own_addr(struct bt_le_ext_adv *adv, uint32_t options,
 
 		if (IS_ENABLED(CONFIG_BT_PRIVACY) &&
 		    !(options & BT_LE_ADV_OPT_USE_IDENTITY)) {
-			err = bt_id_set_adv_private_addr(adv);
+			err = bt_id_set_adv_private_addr(adv, options);
 			if (err) {
 				return err;
 			}
@@ -2172,7 +2201,7 @@ int bt_id_set_adv_own_addr(struct bt_le_ext_adv *adv, uint32_t options,
 			 */
 			if (!IS_ENABLED(CONFIG_BT_SCAN_WITH_IDENTITY) ||
 			    !dev_scanning) {
-				err = bt_id_set_adv_private_addr(adv);
+				err = bt_id_set_adv_private_addr(adv, options);
 				*own_addr_type = BT_HCI_OWN_ADDR_RANDOM;
 			} else {
 				if (id_addr->type == BT_ADDR_LE_RANDOM) {
@@ -2186,11 +2215,11 @@ int bt_id_set_adv_own_addr(struct bt_le_ext_adv *adv, uint32_t options,
 				bt_le_scan_set_enable(BT_HCI_LE_SCAN_ENABLE);
 			}
 #else
-			err = bt_id_set_adv_private_addr(adv);
+			err = bt_id_set_adv_private_addr(adv, options);
 			*own_addr_type = BT_HCI_OWN_ADDR_RANDOM;
 #endif /* defined(CONFIG_BT_OBSERVER) */
 		} else {
-			err = bt_id_set_adv_private_addr(adv);
+			err = bt_id_set_adv_private_addr(adv, options);
 			*own_addr_type = BT_HCI_OWN_ADDR_RANDOM;
 		}
 
