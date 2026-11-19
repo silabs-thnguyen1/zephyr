@@ -48,6 +48,18 @@ static void before(void *fixture)
 	zassert_equal(ret, TC_PASS);
 }
 
+static void after_streams_idle(void *fixture)
+{
+	ARG_UNUSED(fixture);
+
+	if (dev_i2s_tx != NULL && device_is_ready(dev_i2s_tx)) {
+		(void)i2s_trigger(dev_i2s_tx, I2S_DIR_TX, I2S_TRIGGER_DROP);
+	}
+	if (dev_i2s_rx != NULL && device_is_ready(dev_i2s_rx)) {
+		(void)i2s_trigger(dev_i2s_rx, I2S_DIR_RX, I2S_TRIGGER_DROP);
+	}
+}
+
 static void before_dir_both(void *fixture)
 {
 	ARG_UNUSED(fixture);
@@ -74,8 +86,8 @@ static void before_dir_both(void *fixture)
 	}
 }
 
-ZTEST_SUITE(i2s_loopback, NULL, setup, before, NULL, NULL);
-ZTEST_SUITE(i2s_states, NULL, setup, before, NULL, NULL);
+ZTEST_SUITE(i2s_loopback, NULL, setup, before, after_streams_idle, NULL);
+ZTEST_SUITE(i2s_states, NULL, setup, before, after_streams_idle, NULL);
 ZTEST_SUITE(i2s_dir_both_states, NULL, setup, before_dir_both, NULL, NULL);
 ZTEST_SUITE(i2s_dir_both_loopback, NULL, setup, before_dir_both, NULL, NULL);
-ZTEST_SUITE(i2s_errors, NULL, setup, before, NULL, NULL);
+ZTEST_SUITE(i2s_errors, NULL, setup, before, after_streams_idle, NULL);
