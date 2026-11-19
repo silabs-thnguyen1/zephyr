@@ -12,6 +12,10 @@
 #include <zephyr/audio/codec.h>
 #include <string.h>
 
+#if defined(CONFIG_I2S_SILABS_USART)
+#include <zephyr/sys/util.h>
+#endif
+
 
 #if DT_NODE_EXISTS(DT_NODELABEL(i2s_rxtx))
 #define I2S_RX_NODE  DT_NODELABEL(i2s_rxtx)
@@ -37,6 +41,22 @@
 #define SAMPLES_PER_BLOCK   ((CONFIG_SAMPLE_FREQ / ECHO_DELAY) * NUMBER_OF_CHANNELS)
 #define INITIAL_BLOCKS      2
 #define TIMEOUT             1000
+
+#if defined(CONFIG_I2S_SILABS_USART)
+/*
+ * W32D16: 32-bit slot, 16-bit sample in bits [15:0], BCLK = 64 x frame clock.
+ * One LDMA block is at most 1024 x 4-byte beats (4096 bytes).
+ */
+#undef SAMPLE_BIT_WIDTH
+#undef BYTES_PER_SAMPLE
+#undef SAMPLES_PER_BLOCK
+#define I2S_SILABS_LDMA_MAX_BLOCK_BYTES 4096U
+#define SILABS_MAX_SAMPLES_PER_BLOCK (I2S_SILABS_LDMA_MAX_BLOCK_BYTES / 4U)
+#define SILABS_WANTED_SAMPLES ((CONFIG_SAMPLE_FREQ / ECHO_DELAY) * NUMBER_OF_CHANNELS)
+#define SAMPLE_BIT_WIDTH      32
+#define BYTES_PER_SAMPLE      4
+#define SAMPLES_PER_BLOCK     MIN(SILABS_WANTED_SAMPLES, SILABS_MAX_SAMPLES_PER_BLOCK)
+#endif
 
 #define SW0_NODE        DT_ALIAS(sw0)
 #ifdef CONFIG_TOGGLE_ECHO_EFFECT_SW0
@@ -159,6 +179,55 @@ static void process_block_data(void *mem_block, uint32_t number_of_samples)
 		memset(echo_block, 0, sizeof(echo_block));
 	}
 }
+
+#if defined(CONFIG_I2S_SILABS_USART)
+static int16_t echo_w32d16_load(const int32_t *words, uint32_t i)
+{
+	int32_t raw = words[i];
+	int16_t sample = (int16_t)(raw & 0xffff);
+
+	if (sample == 0 && ((uint32_t)raw >> 16) != 0U) {
+		sample = (int16_t)(raw >> 16);
+	}
+
+	return sample;
+}
+
+static void echo_w32d16_store(int32_t *words, uint32_t i, int16_t sample)
+{
+	words[i] = (int32_t)sample;
+}
+
+static void silabs_process_block_data(void *mem_block, uint32_t number_of_samples)
+{
+	static bool clear_echo_block;
+
+	if (echo_enabled) {
+		for (uint32_t i = 0; i < number_of_samples; i++) {
+			int16_t sample;
+
+			sample = echo_w32d16_load((const int32_t *)mem_block, i);
+			/* Attenuate both paths by 6 dB before mixing. */
+			int32_t mixed_sample = ((int32_t)sample / 2) + echo_block[i];
+
+			sample = CLAMP(mixed_sample, INT16_MIN, INT16_MAX);
+			echo_w32d16_store((int32_t *)mem_block, i, sample);
+			echo_block[i] = sample / 2;
+		}
+
+		clear_echo_block = true;
+	} else if (clear_echo_block) {
+		clear_echo_block = false;
+		memset(echo_block, 0, sizeof(echo_block));
+	}
+}
+
+static void silabs_apply_stream_options(struct i2s_config *config)
+{
+	/* BCLK runs only while TX shifts. The driver rejects a free-running clock. */
+	config->options |= I2S_OPT_BIT_CLK_GATED;
+}
+#endif
 
 static bool configure_streams(const struct device *i2s_dev_rx,
 			      const struct device *i2s_dev_tx,
@@ -324,6 +393,9 @@ int main(void)
 #else
 	config.options = I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER;
 #endif
+#if defined(CONFIG_I2S_SILABS_USART)
+	silabs_apply_stream_options(&config);
+#endif
 	config.frame_clk_freq = CONFIG_SAMPLE_FREQ;
 	config.mem_slab = &mem_slab;
 	config.block_size = BLOCK_SIZE;
@@ -357,7 +429,11 @@ int main(void)
 				break;
 			}
 
+#if defined(CONFIG_I2S_SILABS_USART)
+			silabs_process_block_data(mem_block, SAMPLES_PER_BLOCK);
+#else
 			process_block_data(mem_block, SAMPLES_PER_BLOCK);
+#endif
 
 			ret = i2s_write(i2s_dev_tx, mem_block, block_size);
 			if (ret < 0) {
