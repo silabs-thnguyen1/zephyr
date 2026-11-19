@@ -9,8 +9,11 @@ description: |
   in a board or application overlay (not the shared SoC DTSI), since SPI and
   I2S cannot share the same USART.
 
-  The driver currently supports TX (stereo and mono). RX is not supported yet
-  (``i2s_configure(I2S_DIR_RX)`` returns ``-ENOTSUP``).
+  Supports stereo/mono TX and stereo RX. ``i2s_config.word_size`` selects
+  the format: 16 (W16D16) or 32 (W32D16). As USART I2S master, BCLK/LRCLK
+  run only while TX shifts data; configure/start RX without an active TX
+  stream will not produce clocks (full-duplex needs TX, or an external bit
+  clock).
 
 compatible: "silabs,usart-i2s"
 
@@ -36,12 +39,13 @@ properties:
     required: true
     description: |
       DMA channels for ``txbl`` (USARTnTXBL) and optional ``txblright``
-      (USARTnTXBLRIGHT, mono TX).
+      (USARTnTXBLRIGHT, mono TX) and ``rxdatav`` (USARTnRXDATAV).
 
   dma-names:
     required: true
     description: |
       Must include ``txbl``. Add ``txblright`` for mono TX (``channels = 1``).
+      Add ``rxdatav`` for stereo RX.
 
   silabs,mono-tx-slot:
     type: string
@@ -97,6 +101,7 @@ examples:
       pinctrl-names = "default";
       silabs,mclk-out = <&clkout0>;
       dmas = <&dma0 DMA_REQSEL_USART0TXBL>,
-             <&dma0 DMA_REQSEL_USART0TXBLRIGHT>;
-      dma-names = "txbl", "txblright";
+             <&dma0 DMA_REQSEL_USART0TXBLRIGHT>,
+             <&dma0 DMA_REQSEL_USART0RXDATAV>;
+      dma-names = "txbl", "txblright", "rxdatav";
     };
