@@ -155,12 +155,6 @@ struct i2s_silabs_usart_stream {
 	 * queue), false = I2S_TRIGGER_STOP (finish the current/pending block only).
 	 */
 	bool drain;
-	/*
-	 * Gated BCLK stopped (TX underrun) while RX is STOPPING. The block in
-	 * active still completes and is queued; the already-chained next block
-	 * is dropped because it can never finish without a bit clock.
-	 */
-	bool stop_after_active;
 	struct i2s_config cfg;
 	struct k_msgq q;
 	char q_buf[I2S_SILABS_BLOCK_Q_MAX_DEPTH * sizeof(struct i2s_silabs_usart_block)];
@@ -175,6 +169,10 @@ struct i2s_silabs_usart_stream {
 	struct i2s_silabs_usart_dma dma;
 	struct k_sem sem;
 };
+
+static void i2s_silabs_usart_rx_stall_on_clock_lost(const struct device *dev,
+						    bool fault_running);
+static bool i2s_silabs_usart_tx_shifts_bit_clock(const struct i2s_silabs_usart_data *data);
 
 struct i2s_silabs_usart_data {
 	struct i2s_silabs_usart_stream tx;
@@ -317,7 +315,7 @@ static inline int i2s_silabs_usart_block_q_get(struct k_msgq *q, void **blk, siz
 	return ret;
 }
 
-static inline bool i2s_silabs_usart_tx_q_empty(struct i2s_silabs_usart_stream *tx)
+static inline bool i2s_silabs_usart_tx_q_empty(const struct i2s_silabs_usart_stream *tx)
 {
 	return tx->q_unpop.blk == NULL && k_msgq_num_used_get(&tx->q) == 0U;
 }
@@ -394,6 +392,8 @@ static void i2s_silabs_usart_tx_finish_stopping_if_quiescent(const struct device
 	i2s_silabs_usart_mono_tx_silence_stop(dev);
 	tx->drain = false;
 	tx->state = I2S_STATE_READY;
+	/* Clean stop: only unwind an RX stream that is already STOPPING. */
+	i2s_silabs_usart_rx_stall_on_clock_lost(dev, false);
 }
 
 static inline void i2s_silabs_usart_apply_dma_xfer_size(struct dma_config *dma_cfg,
@@ -683,6 +683,95 @@ static void i2s_silabs_usart_tx_drop(const struct device *dev)
 		i2s_silabs_usart_tx_release_block(tx, blk);
 	}
 	tx->drain = false;
+	i2s_silabs_usart_rx_stall_on_clock_lost(dev, true);
+}
+
+static bool i2s_silabs_usart_tx_shifts_bit_clock(const struct i2s_silabs_usart_data *data)
+{
+	const struct i2s_silabs_usart_stream *tx = &data->tx;
+
+	if (!tx->cfg_valid) {
+		return false;
+	}
+	if (tx->state == I2S_STATE_RUNNING) {
+		return true;
+	}
+	if (tx->state == I2S_STATE_STOPPING) {
+		if (tx->active != NULL || tx->pending != NULL || tx->dma.busy) {
+			return true;
+		}
+		if (tx->drain && !i2s_silabs_usart_tx_q_empty(tx)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Master BCLK is no longer shifting, so in-flight RX LDMA cannot complete.
+ * STOPPING returns to READY. RUNNING is left alone unless fault_running is
+ * set (TX DROP, underrun, or DMA abort): a clean TX DRAIN/STOP must not turn
+ * a still-running RX into ERROR before the application calls RX STOP.
+ */
+static void i2s_silabs_usart_rx_stall_on_clock_lost(const struct device *dev,
+						    bool fault_running)
+{
+	const struct i2s_silabs_usart_cfg *cfg = dev->config;
+	struct i2s_silabs_usart_data *data = dev->data;
+	struct i2s_silabs_usart_stream *rx = &data->rx;
+	void *stall_active;
+	void *stall_pending;
+	int32_t prev_state;
+	bool wake_error = false;
+	k_spinlock_key_t key;
+
+	if (!rx->cfg_valid) {
+		return;
+	}
+
+	key = k_spin_lock(&data->lock);
+
+	prev_state = rx->state;
+	if (prev_state == I2S_STATE_RUNNING && !fault_running) {
+		k_spin_unlock(&data->lock, key);
+		return;
+	}
+	if (prev_state != I2S_STATE_RUNNING && prev_state != I2S_STATE_STOPPING) {
+		k_spin_unlock(&data->lock, key);
+		return;
+	}
+
+	if (rx->active == NULL && rx->pending == NULL && !rx->dma.busy) {
+		if (prev_state == I2S_STATE_STOPPING) {
+			rx->state = I2S_STATE_READY;
+		}
+		k_spin_unlock(&data->lock, key);
+		return;
+	}
+
+	dma_stop(cfg->dma_dev, (uint32_t)rx->dma.channel);
+	rx->dma.busy = false;
+	stall_active = rx->active;
+	stall_pending = rx->pending;
+	rx->active = NULL;
+	rx->pending = NULL;
+
+	if (prev_state == I2S_STATE_STOPPING) {
+		rx->state = I2S_STATE_READY;
+	} else {
+		rx->state = I2S_STATE_ERROR;
+		wake_error = true;
+	}
+
+	k_spin_unlock(&data->lock, key);
+
+	i2s_silabs_usart_rx_release_block(rx, stall_active);
+	i2s_silabs_usart_rx_release_block(rx, stall_pending);
+	i2s_silabs_usart_hw_flush_rx(cfg->base);
+
+	if (wake_error) {
+		k_sem_give(&rx->sem);
+	}
 }
 
 static void i2s_silabs_usart_rx_release_block(struct i2s_silabs_usart_stream *rx, void *blk)
@@ -722,7 +811,6 @@ static void i2s_silabs_usart_rx_drop(const struct device *dev)
 	while (i2s_silabs_usart_block_q_get(&rx->q, &blk, &len) == 0) {
 		i2s_silabs_usart_rx_release_block(rx, blk);
 	}
-	rx->stop_after_active = false;
 	k_sem_reset(&rx->sem);
 }
 
@@ -846,66 +934,12 @@ static void i2s_silabs_usart_rx_abort_stream(const struct device *dev)
 	i2s_silabs_usart_rx_wake_error(rx);
 }
 
-/*
- * RX is STOPPING and the bit clock is already gone, so the block now in
- * `active` will never complete. Drop it and return to READY. Do not call this
- * while `pending` is still set: that block has not been retired by the DMA
- * callback yet and the caller still expects it on i2s_read().
- */
-static void i2s_silabs_usart_rx_drop_stalled(const struct device *dev)
-{
-	const struct i2s_silabs_usart_cfg *cfg = dev->config;
-	struct i2s_silabs_usart_data *data = dev->data;
-	struct i2s_silabs_usart_stream *rx = &data->rx;
-	void *stalled;
-	k_spinlock_key_t key;
-
-	key = k_spin_lock(&data->lock);
-	if (!rx->cfg_valid || rx->state != I2S_STATE_STOPPING || rx->pending != NULL) {
-		k_spin_unlock(&data->lock, key);
-		return;
-	}
-
-	dma_stop(cfg->dma_dev, (uint32_t)rx->dma.channel);
-	rx->dma.busy = false;
-	stalled = rx->active;
-	rx->active = NULL;
-	rx->stop_after_active = false;
-	rx->state = I2S_STATE_READY;
-	k_spin_unlock(&data->lock, key);
-
-	i2s_silabs_usart_rx_release_block(rx, stalled);
-	i2s_silabs_usart_hw_flush_rx(cfg->base);
-}
-
 static void i2s_silabs_usart_tx_underrun(const struct device *dev)
 {
 	struct i2s_silabs_usart_data *data = dev->data;
-	struct i2s_silabs_usart_stream *rx = &data->rx;
-	bool drop_stalled;
-	k_spinlock_key_t key;
 
 	data->tx.state = I2S_STATE_ERROR;
-
-	/*
-	 * Master BCLK stops with the last TX word. If RX STOP already armed a
-	 * second block, that block cannot finish. Keep the block the DMA
-	 * callback has not retired yet.
-	 */
-	key = k_spin_lock(&data->lock);
-	drop_stalled = false;
-	if (rx->state == I2S_STATE_STOPPING) {
-		if (rx->pending != NULL) {
-			rx->stop_after_active = true;
-		} else {
-			drop_stalled = true;
-		}
-	}
-	k_spin_unlock(&data->lock, key);
-
-	if (drop_stalled) {
-		i2s_silabs_usart_rx_drop_stalled(dev);
-	}
+	i2s_silabs_usart_rx_stall_on_clock_lost(dev, true);
 }
 
 static void i2s_silabs_usart_dma_rx_cb(const struct device *dma_dev, void *user_data,
@@ -942,25 +976,13 @@ static void i2s_silabs_usart_dma_rx_cb(const struct device *dma_dev, void *user_
 		rx->dma.busy = false;
 	}
 
+	k_spin_unlock(&data->lock, key);
+
 	/*
-	 * TX underrun stopped BCLK. Queue the block that just finished, then
-	 * drop the chained one that cannot complete.
+	 * `done` was detached under the lock. A concurrent clock-loss stall
+	 * only frees the blocks still linked as active/pending, so this
+	 * pointer must be queued or released here.
 	 */
-	if (rx->stop_after_active && rx->state == I2S_STATE_STOPPING) {
-		void *chained = rx->active;
-
-		dma_stop(cfg->dma_dev, (uint32_t)rx->dma.channel);
-		rx->dma.busy = false;
-		rx->active = NULL;
-		rx->pending = NULL;
-		rx->stop_after_active = false;
-		rx->state = I2S_STATE_READY;
-		k_spin_unlock(&data->lock, key);
-		i2s_silabs_usart_rx_release_block(rx, chained);
-	} else {
-		k_spin_unlock(&data->lock, key);
-	}
-
 	if (done != NULL) {
 		if (i2s_silabs_usart_block_q_put(&rx->q, done, rx->cfg.block_size) == 0) {
 			k_sem_give(&rx->sem);
@@ -990,11 +1012,7 @@ static void __maybe_unused i2s_silabs_usart_isr(const void *arg)
 			return;
 		}
 		if (data->rx.state == I2S_STATE_STOPPING) {
-			if (data->rx.pending != NULL) {
-				data->rx.stop_after_active = true;
-			} else {
-				i2s_silabs_usart_rx_drop_stalled(dev);
-			}
+			i2s_silabs_usart_rx_stall_on_clock_lost(dev, false);
 		} else if (data->rx.state == I2S_STATE_RUNNING) {
 			i2s_silabs_usart_rx_abort_stream(dev);
 		}
@@ -1394,6 +1412,7 @@ static void i2s_silabs_usart_tx_abort_stream(const struct device *dev)
 	tx->dma.busy = false;
 	i2s_silabs_usart_mono_tx_silence_stop(dev);
 	i2s_silabs_usart_tx_release_inflight(tx);
+	i2s_silabs_usart_rx_stall_on_clock_lost(dev, true);
 }
 
 static void i2s_silabs_usart_dma_tx_cb(const struct device *dma_dev, void *user_data,
@@ -1591,6 +1610,7 @@ static int i2s_silabs_usart_trigger_stop(const struct device *dev, enum i2s_dir 
 		data->tx.drain = false;
 		if (data->tx.active == NULL && data->tx.pending == NULL) {
 			data->tx.state = I2S_STATE_READY;
+			i2s_silabs_usart_rx_stall_on_clock_lost(dev, false);
 		} else {
 			data->tx.state = I2S_STATE_STOPPING;
 			i2s_silabs_usart_tx_finish_stopping_if_quiescent(dev);
@@ -1607,6 +1627,9 @@ static int i2s_silabs_usart_trigger_stop(const struct device *dev, enum i2s_dir 
 	} else {
 		data->rx.state = I2S_STATE_STOPPING;
 		i2s_silabs_usart_rx_finish_stopping_if_quiescent(dev);
+		if (!i2s_silabs_usart_tx_shifts_bit_clock(data)) {
+			i2s_silabs_usart_rx_stall_on_clock_lost(dev, false);
+		}
 	}
 	return 0;
 }
@@ -1634,6 +1657,9 @@ static int i2s_silabs_usart_trigger_drain(const struct device *dev, enum i2s_dir
 
 	data->rx.state = I2S_STATE_STOPPING;
 	i2s_silabs_usart_rx_finish_stopping_if_quiescent(dev);
+	if (!i2s_silabs_usart_tx_shifts_bit_clock(data)) {
+		i2s_silabs_usart_rx_stall_on_clock_lost(dev, false);
+	}
 	return 0;
 }
 
