@@ -159,6 +159,7 @@ static bool init_buttons(void)
 	return true;
 }
 
+#if !defined(CONFIG_I2S_SILABS_USART)
 static void process_block_data(void *mem_block, uint32_t number_of_samples)
 {
 	static bool clear_echo_block;
@@ -179,6 +180,7 @@ static void process_block_data(void *mem_block, uint32_t number_of_samples)
 		memset(echo_block, 0, sizeof(echo_block));
 	}
 }
+#endif
 
 #if defined(CONFIG_I2S_SILABS_USART)
 static int16_t echo_w32d16_load(const int32_t *words, uint32_t i)

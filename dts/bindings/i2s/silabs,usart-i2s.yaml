@@ -10,10 +10,11 @@ description: |
   I2S cannot share the same USART.
 
   Supports stereo/mono TX and stereo RX. ``i2s_config.word_size`` selects
-  the format: 16 (W16D16) or 32 (W32D16). As USART I2S master, BCLK/LRCLK
-  run only while TX shifts data; configure/start RX without an active TX
-  stream will not produce clocks (full-duplex needs TX, or an external bit
-  clock).
+  the format: 16 (W16D16) or 32 (W32D16). 32-bit RX has been verified on
+  xG27 with an I2S MEMS microphone; 32-bit TX is not verified yet. As USART
+  I2S master, BCLK/LRCLK run only while TX shifts data; configure/start RX
+  without an active TX stream will not produce clocks (full-duplex needs TX,
+  or an external bit clock).
 
 compatible: "silabs,usart-i2s"
 
