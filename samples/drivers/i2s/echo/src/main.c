@@ -12,6 +12,10 @@
 #include <zephyr/audio/codec.h>
 #include <string.h>
 
+#if defined(CONFIG_I2S_SILABS_USART)
+#include <zephyr/sys/util.h>
+#endif
+
 
 #if DT_NODE_EXISTS(DT_NODELABEL(i2s_rxtx))
 #define I2S_RX_NODE  DT_NODELABEL(i2s_rxtx)
@@ -37,6 +41,18 @@
 #define SAMPLES_PER_BLOCK   ((CONFIG_SAMPLE_FREQ / ECHO_DELAY) * NUMBER_OF_CHANNELS)
 #define INITIAL_BLOCKS      2
 #define TIMEOUT             1000
+
+#if defined(CONFIG_I2S_SILABS_USART)
+/*
+ * W32D16 on the bus: set silabs,slot-width = 32 in the board overlay.
+ * The driver still uses i2s_config.word_size 16 (16-bit words in memory).
+ */
+#define I2S_SILABS_LDMA_MAX_BLOCK_BYTES 4096U
+#undef SAMPLES_PER_BLOCK
+#define SILABS_WANTED_SAMPLES ((CONFIG_SAMPLE_FREQ / ECHO_DELAY) * NUMBER_OF_CHANNELS)
+#define SILABS_MAX_SAMPLES (I2S_SILABS_LDMA_MAX_BLOCK_BYTES / BYTES_PER_SAMPLE)
+#define SAMPLES_PER_BLOCK  MIN(SILABS_WANTED_SAMPLES, SILABS_MAX_SAMPLES)
+#endif
 
 #define SW0_NODE        DT_ALIAS(sw0)
 #ifdef CONFIG_TOGGLE_ECHO_EFFECT_SW0
@@ -159,6 +175,14 @@ static void process_block_data(void *mem_block, uint32_t number_of_samples)
 		memset(echo_block, 0, sizeof(echo_block));
 	}
 }
+
+#if defined(CONFIG_I2S_SILABS_USART)
+static void silabs_apply_stream_options(struct i2s_config *config)
+{
+	/* BCLK runs only while TX shifts. The driver rejects a free-running clock. */
+	config->options |= I2S_OPT_BIT_CLK_GATED;
+}
+#endif
 
 static bool configure_streams(const struct device *i2s_dev_rx,
 			      const struct device *i2s_dev_tx,
@@ -315,7 +339,11 @@ int main(void)
 		return 0;
 	}
 
+#if defined(CONFIG_I2S_SILABS_USART)
+	config.word_size = 16U;
+#else
 	config.word_size = SAMPLE_BIT_WIDTH;
+#endif
 	config.channels = NUMBER_OF_CHANNELS;
 	config.format = I2S_FMT_DATA_FORMAT_I2S;
 
@@ -323,6 +351,9 @@ int main(void)
 	config.options = I2S_OPT_FRAME_CLK_TARGET | I2S_OPT_BIT_CLK_TARGET;
 #else
 	config.options = I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER;
+#endif
+#if defined(CONFIG_I2S_SILABS_USART)
+	silabs_apply_stream_options(&config);
 #endif
 	config.frame_clk_freq = CONFIG_SAMPLE_FREQ;
 	config.mem_slab = &mem_slab;

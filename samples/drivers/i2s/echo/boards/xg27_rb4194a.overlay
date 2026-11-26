@@ -1,0 +1,70 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Silicon Laboratories Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * xG27-RB4194A: USART0 I2S for samples/drivers/i2s/echo (mic + amp).
+ *
+ * EXP4  PC0  TX  -> MAX98357 DIN
+ * EXP6  PC1  RX  <- INMP411 SD
+ * EXP8  PC2  BCLK (shared)
+ * EXP10 PC3  WS  (shared)
+ * INMP411 L/R to GND (left slot). MAX98357 SD to 3.3 V (left, amp on).
+ * Give the amp its own supply (shared 3.3 V sags under load).
+ */
+
+#include <zephyr/dt-bindings/pinctrl/silabs/xg27-pinctrl.h>
+#include <zephyr/dt-bindings/dma/silabs/xg27-dma.h>
+
+&dma0 {
+	status = "okay";
+};
+
+/ {
+	aliases {
+		/delete-property/ spi-flash0;
+	};
+};
+
+&pinctrl {
+	usart0_i2s_default: usart0_i2s_default {
+		group0 {
+			pins = <USART0_TX_PC0>, <USART0_CLK_PC2>, <USART0_CS_PC3>;
+			drive-push-pull;
+			output-high;
+		};
+
+		group1 {
+			pins = <USART0_RX_PC1>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+};
+
+&mx25r80 {
+	status = "disabled";
+};
+
+&ls013b7dh03 {
+	status = "disabled";
+};
+
+&eusart0 {
+	status = "disabled";
+};
+
+i2s_rxtx: &usart0 {
+	compatible = "silabs,usart-i2s";
+	/delete-property/ cs-gpios;
+	/delete-property/ clock-frequency;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-0 = <&usart0_i2s_default>;
+	pinctrl-names = "default";
+	dmas = <&dma0 DMA_REQSEL_USART0TXBL>,
+	       <&dma0 DMA_REQSEL_USART0TXBLRIGHT>,
+	       <&dma0 DMA_REQSEL_USART0RXDATAV>;
+	dma-names = "txbl", "txblright", "rxdatav";
+	silabs,slot-width = <32>;
+	status = "okay";
+};
