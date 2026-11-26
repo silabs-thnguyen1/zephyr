@@ -48,6 +48,9 @@
  *   Mono TX pairs with a stereo RX stream: RXDATAV keeps requesting every
  *   received slot with DMASPLIT=1, so RX still reads interleaved L/R from
  *   RXDOUBLE. Only frame clock, word size and format must match TX.
+ *   Mono TX pairs with a stereo RX stream: RXDATAV keeps requesting every
+ *   received slot with DMASPLIT=1, so RX still reads interleaved L/R from
+ *   RXDOUBLE. Only frame clock, word size and format must match TX.
  *
  * With DATABITS=16, USARTn_TXDATA loads only 8 FIFO bits per write; a full
  * I2S slot needs USARTn_TXDOUBLE (see RM 22.3.2.6 / 22.3.2.19). Stereo

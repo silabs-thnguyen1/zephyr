@@ -1,0 +1,10 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Silicon Laboratories Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * W32D16: 32 bit clocks per slot (BCLK = 64 x LRCLK). Added with -DSLOT_WIDTH=32.
+ */
+
+&usart0 {
+	silabs,slot-width = <32>;
+};
