@@ -11,7 +11,12 @@
  * master. While the RX stream is RUNNING or STOPPING and TX has no application
  * block to send, the driver feeds the TX channel with silence (the clock fill)
  * so the bus keeps clocking; RX therefore works with or without a TX stream.
- * configure() requires I2S_OPT_BIT_CLK_GATED; I2S_OPT_BIT_CLK_CONT is rejected
+ * Exception: when RX is started while the TX stream is READY with blocks already
+ * queued, no fill is started. The clock then begins with I2S_TRIGGER_START on TX,
+ * so the first RX block holds the first TX block with no silence in front.
+ * I2S_TRIGGER_STOP / DRAIN on RX end with the current block; the block chained
+ * behind it is received only if the TX channel still carries application data
+ * for it. configure() requires I2S_OPT_BIT_CLK_GATED; I2S_OPT_BIT_CLK_CONT is rejected
  * with -EINVAL. I2S_DIR_BOTH is -ENOSYS.
  *
  * The hardware always emits two channel slots per LRCLK frame on the wire.
@@ -40,13 +45,20 @@
  *   Slot assignment comes from silabs,mono-tx-slot (default right).
  *   Application buffer: [M0, M1, ...] (one sample per LRCLK frame).
  *   I2SCTRL.MONO stays 0; LRCLK still toggles L/R on the bus.
- *   Mono TX and RX cannot be configured together.
+ *   Mono TX pairs with a stereo RX stream: RXDATAV keeps requesting every
+ *   received slot with DMASPLIT=1, so RX still reads interleaved L/R from
+ *   RXDOUBLE. Only frame clock, word size and format must match TX.
  *
  * With DATABITS=16, USARTn_TXDATA loads only 8 FIFO bits per write; a full
  * I2S slot needs USARTn_TXDOUBLE (see RM 22.3.2.6 / 22.3.2.19). Stereo
  * and mono TX both target TXDOUBLE; mono moves one slot per DMA trigger.
  *
- * i2s_config.word_size must be 16: FORMAT = W16D16, BCLK = 32 x frame clock.
+ * i2s_config.word_size must be 16. The slot width comes from silabs,slot-width:
+ *   16: FORMAT = W16D16, BCLK = 32 x frame clock.
+ *   32: FORMAT = W32D16, BCLK = 64 x frame clock. RX reads the 16 MSBs of each
+ *       slot (e.g. the top of a 24-bit MEMS microphone sample) and TX sends
+ *       zeros after the sample. Memory and LDMA still move one 16-bit word
+ *       per slot.
  */
 
  #include <errno.h>
@@ -79,8 +91,11 @@
  /* Stereo: every LRCLK frame carries L + R = 2 channel slots. */
  #define I2S_STEREO_SLOTS_PER_FRAME 2U
 
- /* The only supported i2s_config.word_size (W16D16). */
+ /* The only supported i2s_config.word_size. */
  #define I2S_SILABS_WORD_SIZE 16U
+
+ /* silabs,slot-width value that selects W32D16. */
+ #define I2S_SILABS_SLOT_WIDTH_32 32U
 
  /* Bytes of one slot in memory, also the LDMA beat size. */
  #define I2S_SILABS_SLOT_BYTES 2U
@@ -153,6 +168,14 @@
 	  * queue), false = I2S_TRIGGER_STOP (finish the current/pending block only).
 	  */
 	 bool drain;
+	 /*
+	  * RX only. Set by I2S_TRIGGER_STOP / DRAIN while a second block is
+	  * chained behind the current one: that block is received too only when
+	  * the TX stream carries application data for it. Otherwise it would
+	  * deliver nothing but the clock fill. Cleared once the current block
+	  * has completed.
+	  */
+	 bool keep_pending;
 	 struct i2s_config cfg;
 	 struct k_msgq q;
 	 char q_buf[I2S_SILABS_BLOCK_Q_MAX_DEPTH * sizeof(struct i2s_silabs_usart_block)];
@@ -200,6 +223,7 @@
 	 bool has_tx_split;
 	 bool has_rx;
 	 uint8_t mono_tx_default;
+	 uint8_t slot_width; /* silabs,slot-width: bit clocks per slot */
  };
 
  /*
@@ -373,16 +397,27 @@
 	 sl_hal_usart_clear_interrupts(base, USART_IF_TXUF | USART_IF_RXOF);
  }
 
- /* Discard received data left in the RX FIFO together with its pending flags. */
+ /*
+  * Discard received data left in the RX FIFO together with its pending flags.
+  * The receiver stays enabled (see i2s_silabs_usart_hw_rx_start()), so CLEARRX
+  * is written directly: sl_hal_usart_clear_rx() requires a disabled receiver.
+  */
  static void i2s_silabs_usart_hw_flush_rx(USART_TypeDef *base)
  {
-	 sl_hal_usart_clear_rx(base);
+	 base->CMD_SET = USART_CMD_CLEARRX;
 	 sl_hal_usart_clear_interrupts(base, USART_IF_RXOF | USART_IF_RXDATAV | USART_IF_RXFULL);
  }
 
  /*
-  * Every TX frame overflows the RX FIFO while nothing drains it, so the
-  * receiver and RXOF run only while the RX stream is RUNNING or STOPPING.
+  * Every TX frame overflows the RX FIFO while nothing drains it, so RXOF runs
+  * only while the RX stream is RUNNING or STOPPING and the FIFO is flushed on
+  * every start and stop.
+  *
+  * The receiver itself is left enabled once started and is not disabled on
+  * stop. A receiver that is disabled and enabled again loses its word-select
+  * synchronization and drops the first frame of the next run, which shifts the
+  * whole RX stream by one frame. It is disabled with the USART in
+  * i2s_silabs_usart_hw_apply() / power-down.
   */
  static void i2s_silabs_usart_hw_rx_start(USART_TypeDef *base)
  {
@@ -394,15 +429,18 @@
  static void i2s_silabs_usart_hw_rx_stop(USART_TypeDef *base)
  {
 	 sl_hal_usart_disable_interrupts(base, USART_IF_RXOF);
-	 sl_hal_usart_disable_rx(base);
 	 i2s_silabs_usart_hw_flush_rx(base);
  }
 
- /* The wire format must match; mono TX (channels = 1) therefore never pairs with RX. */
+ /*
+  * The wire format must match. The wire always carries two slots per frame, so
+  * a mono TX stream (channels = 1) pairs with a stereo RX stream; only the
+  * channel count of the memory layout differs.
+  */
  static bool i2s_silabs_usart_cfg_bus_match(const struct i2s_config *a, const struct i2s_config *b)
  {
 	 return a->frame_clk_freq == b->frame_clk_freq && a->word_size == b->word_size &&
-		a->channels == b->channels && a->format == b->format;
+		a->format == b->format;
  }
 
  /*
@@ -514,7 +552,7 @@
 	 ic = data->tx.cfg_valid ? &data->tx.cfg : &data->rx.cfg;
 
 	 /* RM: minimum CLKDIV is 0, so max SCLK is ref_hz / 2. */
-	 bit_hz = (uint64_t)ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME * I2S_SILABS_WORD_SIZE;
+	 bit_hz = (uint64_t)ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME * pcfg->slot_width;
 	 if (bit_hz > (uint64_t)*ref_hz / 2U) {
 		 return -EINVAL;
 	 }
@@ -543,9 +581,10 @@
 
 	 /*
 	  * Physical SCLK (bit clock); the wire always carries two slots per frame.
-	  * Example: frame_clk=16 kHz -> bit_hz = 512 kHz.
+	  * Example: frame_clk=16 kHz -> bit_hz = 512 kHz (16-bit slots)
+	  *          or 1.024 MHz (32-bit slots).
 	  */
-	 bit_hz = ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME * I2S_SILABS_WORD_SIZE;
+	 bit_hz = ic->frame_clk_freq * I2S_STEREO_SLOTS_PER_FRAME * pcfg->slot_width;
 
 	 i2s_silabs_usart_tx_dma_apply(dev);
 	 i2s_silabs_usart_hw_disable_data_irqs(pcfg->base);
@@ -557,7 +596,9 @@
 	 init.sync.clock_mode = (clk_fmt == I2S_FMT_CLK_NF_IB || clk_fmt == I2S_FMT_CLK_IF_IB)
 					? SL_HAL_USART_CLOCK_MODE_1
 					: SL_HAL_USART_CLOCK_MODE_0;
-	 init.format = SL_HAL_USART_I2S_FORMAT_W16D16;
+	 init.format = (pcfg->slot_width == I2S_SILABS_SLOT_WIDTH_32)
+			       ? SL_HAL_USART_I2S_FORMAT_W32D16
+			       : SL_HAL_USART_I2S_FORMAT_W16D16;
 	 init.justify = SL_HAL_USART_JUSTIFY_LEFT;
 	 /*
 	  * Wire format stays stereo (MONO=0): LRCLK toggles L/R. Mono TX uses
@@ -624,6 +665,7 @@
 	 rx->active = NULL;
 	 *pending = rx->pending;
 	 rx->pending = NULL;
+	 rx->keep_pending = false;
 	 rx->state = state;
  }
 
@@ -1160,12 +1202,28 @@
 		 queue_full = !queued;
 	 }
 
-	 /* A STOPPING stream is done with its last block; stop the receiver right away. */
-	 if (!queue_full && rx->state == I2S_STATE_STOPPING && rx->active == NULL) {
-		 i2s_silabs_usart_rx_halt_locked(dev, I2S_STATE_READY, &active, &pending);
+	 active = NULL;
+	 pending = NULL;
+
+	 /*
+	  * A STOPPING stream ends with the block that was current when it was
+	  * stopped. The block chained behind it is received only when it carries
+	  * TX application data (keep_pending); otherwise it is discarded, so no
+	  * block of pure clock fill is left in the queue.
+	  */
+	 if (!queue_full && rx->state == I2S_STATE_STOPPING) {
+		 if (rx->active == NULL || !rx->keep_pending) {
+			 i2s_silabs_usart_rx_halt_locked(dev, I2S_STATE_READY, &active, &pending);
+		 } else {
+			 rx->keep_pending = false;
+		 }
 	 }
 
 	 k_spin_unlock(&data->lock, key);
+
+	 /* Blocks detached by the halt above can no longer be completed by the DMA. */
+	 i2s_silabs_usart_rx_release_block(rx, pending);
+	 i2s_silabs_usart_rx_release_block(rx, active);
 
 	 if (queued) {
 		 k_sem_give(&rx->sem);
@@ -1511,6 +1569,16 @@
 		 return -EIO;
 	 }
 
+	 /*
+	  * TX data is already queued: TX START is expected next, and the bit
+	  * clock then follows the first TX block. Starting the clock fill here
+	  * would put silence in front of that block in the RX stream.
+	  */
+	 if (data->tx.cfg_valid && data->tx.state == I2S_STATE_READY &&
+	     !i2s_silabs_usart_tx_q_empty(&data->tx)) {
+		 return 0;
+	 }
+
 	 /* Without application TX data the channel shifts the clock fill. */
 	 i2s_silabs_usart_tx_kick(dev);
 	 return (data->rx.state == I2S_STATE_RUNNING) ? 0 : -EIO;
@@ -1548,7 +1616,13 @@
 	 if (rx->active == NULL && rx->pending == NULL) {
 		 i2s_silabs_usart_rx_halt_locked(dev, I2S_STATE_READY, &active, &pending);
 	 } else {
-		 /* The clock fill keeps running until the armed block(s) complete. */
+		 /*
+		  * RX ends with the current block; the clock keeps running until
+		  * then. The chained block is kept only while the TX channel
+		  * still has application data behind the current one.
+		  */
+		 rx->keep_pending = data->tx.cfg_valid &&
+				    i2s_silabs_usart_tx_is_app_block(data->tx.pending);
 		 rx->state = I2S_STATE_STOPPING;
 	 }
 	 k_spin_unlock(&data->lock, key);
@@ -1805,6 +1879,7 @@
 		 .clock_cfg = SILABS_DT_INST_CLOCK_CFG(idx),                                        \
 		 .pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(idx),                                       \
 		 .mono_tx_default = DT_INST_ENUM_IDX(idx, silabs_mono_tx_slot),                     \
+		 .slot_width = DT_INST_PROP(idx, silabs_slot_width),                                \
 		 I2S_SILABS_USART_DMA_INIT(idx)                                                     \
 		 I2S_SILABS_USART_MCLK_INIT(idx)                                                    \
 	 };                                                                                         \
