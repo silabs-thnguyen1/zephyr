@@ -146,6 +146,11 @@ ZTEST_USER(i2s_loopback, test_i2s_rx_sync_start)
 		return;
 	}
 
+	if (IS_ENABLED(CONFIG_I2S_TEST_SKIP_RX_SYNC_START)) {
+		ztest_test_skip();
+		return;
+	}
+
 	size_t rx_size;
 	int ret;
 	char buf[BLOCK_SIZE];

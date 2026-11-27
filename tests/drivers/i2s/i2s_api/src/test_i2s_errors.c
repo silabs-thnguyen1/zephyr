@@ -11,6 +11,13 @@
 
 #define INVALID_TRIGGER_SETTING 7
 
+#if IS_ENABLED(CONFIG_I2S_TEST_BIT_CLK_GATED)
+#define I2S_API_TEST_OPTS (I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER | \
+			   I2S_OPT_BIT_CLK_GATED)
+#else
+#define I2S_API_TEST_OPTS (I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER)
+#endif
+
 ZTEST_USER(i2s_errors, test_i2s_improper_configuration)
 {
 	int err;
@@ -20,8 +27,7 @@ ZTEST_USER(i2s_errors, test_i2s_improper_configuration)
 					     .frame_clk_freq = FRAME_CLK_FREQ,
 					     .block_size = BLOCK_SIZE,
 					     .timeout = TIMEOUT,
-					     .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					     .options = I2S_API_TEST_OPTS,
 					     .mem_slab = &tx_mem_slab };
 
 
@@ -58,8 +64,7 @@ ZTEST_USER(i2s_errors, test_i2s_config_attempt_in_wrong_state)
 					      .frame_clk_freq = FRAME_CLK_FREQ,
 					      .block_size = BLOCK_SIZE,
 					      .timeout = TIMEOUT,
-					      .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							 I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					      .options = I2S_API_TEST_OPTS,
 					      .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &inactive_config);
@@ -94,8 +99,7 @@ ZTEST_USER(i2s_errors, test_i2s_incorrect_trigger)
 					  .frame_clk_freq = FRAME_CLK_FREQ,
 					  .block_size = BLOCK_SIZE,
 					  .timeout = TIMEOUT,
-					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					  .options = I2S_API_TEST_OPTS,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);
@@ -122,8 +126,7 @@ ZTEST_USER(i2s_errors, test_i2s_unconfigured_access)
 					      .frame_clk_freq = 0,
 					      .block_size = BLOCK_SIZE,
 					      .timeout = TIMEOUT,
-					      .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							 I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					      .options = I2S_API_TEST_OPTS,
 					      .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &inactive_config);
@@ -146,8 +149,7 @@ ZTEST_USER(i2s_errors, test_i2s_improper_block_size_write)
 					  .frame_clk_freq = FRAME_CLK_FREQ,
 					  .block_size = BLOCK_SIZE,
 					  .timeout = TIMEOUT,
-					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					  .options = I2S_API_TEST_OPTS,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);
@@ -169,8 +171,7 @@ static void write_to_exhausted_slab(int32_t timeout, int expected)
 					  .frame_clk_freq = FRAME_CLK_FREQ,
 					  .block_size = BLOCK_SIZE,
 					  .timeout = timeout,
-					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
+					  .options = I2S_API_TEST_OPTS,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);

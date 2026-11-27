@@ -32,13 +32,6 @@ extern bool dir_both_supported;
 #else
 #define I2S_DEV_NODE_TX DT_ALIAS(i2s_node0)
 #endif
-/* Drivers such as silabs,usart-i2s require a gated bit clock */
-#ifdef CONFIG_I2S_TEST_BIT_CLK_GATED
-#define I2S_TEST_BIT_CLK_GATED_OPT I2S_OPT_BIT_CLK_GATED
-#else
-#define I2S_TEST_BIT_CLK_GATED_OPT 0
-#endif
-
 #define BLOCK_SIZE (2 * sizeof(data_l))
 
 #define NUM_RX_BLOCKS	4
