@@ -36,6 +36,22 @@ tests:
       - phyboard_atlas/mimxrt1176/cm7
     harness_config:
       fixture: gpio_loopback
+  drivers.i2s.gpio_loopback.silabs:
+    depends_on:
+      - i2s
+      - gpio
+    tags:
+      - drivers
+      - userspace
+    filter: CONFIG_I2S_TEST_USE_GPIO_LOOPBACK and CONFIG_DT_HAS_SILABS_USART_I2S_ENABLED
+    harness: ztest
+    harness_config:
+      fixture: gpio_loopback
+    platform_allow:
+      - xg27_dk2602a
+      - xg27_rb4194a
+    integration_platforms:
+      - xg27_rb4194a
   drivers.i2s.gpio_loopback.nrf54h:
     depends_on: i2s
     tags:

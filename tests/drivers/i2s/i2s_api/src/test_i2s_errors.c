@@ -21,7 +21,7 @@ ZTEST_USER(i2s_errors, test_i2s_improper_configuration)
 					     .block_size = BLOCK_SIZE,
 					     .timeout = TIMEOUT,
 					     .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							I2S_OPT_BIT_CLK_CONTROLLER,
+							I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					     .mem_slab = &tx_mem_slab };
 
 
@@ -59,7 +59,7 @@ ZTEST_USER(i2s_errors, test_i2s_config_attempt_in_wrong_state)
 					      .block_size = BLOCK_SIZE,
 					      .timeout = TIMEOUT,
 					      .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							 I2S_OPT_BIT_CLK_CONTROLLER,
+							 I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					      .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &inactive_config);
@@ -95,7 +95,7 @@ ZTEST_USER(i2s_errors, test_i2s_incorrect_trigger)
 					  .block_size = BLOCK_SIZE,
 					  .timeout = TIMEOUT,
 					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER,
+						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);
@@ -123,7 +123,7 @@ ZTEST_USER(i2s_errors, test_i2s_unconfigured_access)
 					      .block_size = BLOCK_SIZE,
 					      .timeout = TIMEOUT,
 					      .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-							 I2S_OPT_BIT_CLK_CONTROLLER,
+							 I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					      .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &inactive_config);
@@ -147,7 +147,7 @@ ZTEST_USER(i2s_errors, test_i2s_improper_block_size_write)
 					  .block_size = BLOCK_SIZE,
 					  .timeout = TIMEOUT,
 					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER,
+						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);
@@ -170,7 +170,7 @@ static void write_to_exhausted_slab(int32_t timeout, int expected)
 					  .block_size = BLOCK_SIZE,
 					  .timeout = timeout,
 					  .options = I2S_OPT_FRAME_CLK_CONTROLLER |
-						     I2S_OPT_BIT_CLK_CONTROLLER,
+						     I2S_OPT_BIT_CLK_CONTROLLER | I2S_TEST_BIT_CLK_GATED_OPT,
 					  .mem_slab = &tx_mem_slab };
 
 	err = i2s_configure(dev_i2s, I2S_DIR_TX, &test_config);

@@ -22,9 +22,24 @@ config I2S_TEST_USE_I2S_DIR_BOTH
 	  is essential for devices that cannot independently start and stop
 	  the RX and TX streams.
 
+config I2S_TEST_BIT_CLK_GATED
+	bool "Request I2S_OPT_BIT_CLK_GATED in test configurations"
+	default y if DT_HAS_SILABS_USART_I2S_ENABLED
+	help
+	  Add I2S_OPT_BIT_CLK_GATED to every stream configuration. Needed by
+	  drivers whose bit clock only runs while data is streamed.
+
+config I2S_TEST_RX_CONTROLLER
+	bool "Configure the RX stream as bit/frame clock controller"
+	default y if DT_HAS_SILABS_USART_I2S_ENABLED
+	help
+	  Use controller mode for RX as well, for ports that cannot be a
+	  clock target and share the TX-driven bus clock.
+
 config I2S_TEST_USE_GPIO_LOOPBACK
 	bool "Use GPIO loopback"
 	default y if DT_HAS_NORDIC_NRF_I2S_ENABLED || DT_HAS_NORDIC_NRF_TDM_ENABLED
+	default y if DT_HAS_SILABS_USART_I2S_ENABLED
 	help
 	  Use wiring between the data-out and data-in pins for looping back
 	  data. This option is intended to be used for devices that do not
